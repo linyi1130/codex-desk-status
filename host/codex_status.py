@@ -49,12 +49,6 @@ DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_MDNS = "codex-status"
 DONOR_LIMIT = 8
-# Long enough that a 2-second board poll cannot skip a page, short enough
-# that several live windows still rotate.
-PAGE_DWELL_SECONDS = 4.0
-# The chatting window's 已完成 / 已中断 stays up long enough to notice,
-# including the white flash the board plays on running -> complete.
-COMPLETION_HOLD_SECONDS = 8.0
 MAX_FRESH_PARSES = 24
 
 
@@ -89,21 +83,6 @@ def hook_for_session(hook: HookHint | None, view: SessionView, is_focus: bool) -
             return hook
         return None
     return hook if is_focus else None
-
-
-def page_identity(payload: dict) -> str:
-    session_id = payload.get("session_id")
-    if isinstance(session_id, str) and session_id:
-        return session_id
-    session_file = payload.get("session_file")
-    if isinstance(session_file, str) and session_file:
-        return session_file
-    return ""
-
-
-def page_sort_key(payload: dict, focus_id: object) -> tuple[int, str]:
-    identity = page_identity(payload)
-    return (0 if identity and identity == focus_id else 1, identity)
 
 
 def load_thread_titles(path: Path) -> dict[str, str]:
@@ -209,11 +188,6 @@ class Engine:
         self.cache: dict[str, tuple[int, int, SessionView]] = {}
         # session_meta is the first record and does not change when the file grows.
         self.heads: dict[str, tuple[int, SessionView]] = {}
-        self.focus_status: str | None = None
-        self.hold_until: float | None = None
-        self.hold_session: str | None = None
-        self.rotation_ids: tuple[str, ...] | None = None
-        self.rotation_anchor: float | None = None
         self.thread_titles = ThreadTitleIndex()
 
     def payload(
@@ -248,44 +222,9 @@ class Engine:
             file_mtime=self.focus_mtime(focus_path, focus_view, fresh),
             titles=titles,
         )
-        running = []
-        if focus_payload["status"] == "running":
-            running.append(focus_payload)
-        for path, view, mtime in fresh:
-            page = self.page_payload(
-                view,
-                path,
-                pool,
-                now,
-                tz_offset_seconds,
-                hook,
-                is_focus=False,
-                file_mtime=mtime,
-                titles=titles,
-            )
-            if page["status"] == "running":
-                running.append(page)
-        running.sort(key=lambda page: page_sort_key(page, focus_payload.get("session_id")))
-        self.note_focus(now, focus_payload)
-        if self.holding(now, focus_payload) and focus_payload.get("status") != "running":
-            focus_id = focus_payload.get("session_id")
-            if not any(page.get("session_id") == focus_id for page in running):
-                running.insert(0, focus_payload)
-        if not running:
-            self.rotation_ids = None
-            self.rotation_anchor = None
-            return stamp_page(focus_payload, 1, 1)
-        if len(running) == 1:
-            self.rotation_ids = (page_identity(running[0]),)
-            self.rotation_anchor = now
-            return stamp_page(running[0], 1, 1)
-        ids = tuple(page_identity(page) for page in running)
-        if ids != self.rotation_ids or self.rotation_anchor is None:
-            self.rotation_ids = ids
-            self.rotation_anchor = now
-        elapsed = max(0.0, now - self.rotation_anchor)
-        slot = int((elapsed + 1e-6) / PAGE_DWELL_SECONDS) % len(running)
-        return stamp_page(running[slot], slot + 1, len(running))
+        # One page: the user's chatting window. Running helpers are not shown.
+        # 已完成 / 已中断 stays until that same window starts another turn.
+        return stamp_page(focus_payload, 1, 1)
 
     def select_main(self, files: list[Path]) -> Path:
         """Newest rollout that is the user's chatting window.
@@ -419,31 +358,6 @@ class Engine:
         if payload["source"] == "session" and not payload["has_session"]:
             payload["has_session"] = True
         return apply_sidebar_title(payload, view, titles)
-
-    def note_focus(self, now: float, focus_payload: dict) -> None:
-        status = str(focus_payload.get("status") or "")
-        session_id = focus_payload.get("session_id")
-        if (
-            self.focus_status == "running"
-            and status in {"complete", "interrupted"}
-            and isinstance(session_id, str)
-            and session_id
-        ):
-            self.hold_until = now + COMPLETION_HOLD_SECONDS
-            self.hold_session = session_id
-        if status == "running":
-            self.hold_until = None
-            self.hold_session = None
-        self.focus_status = status
-
-    def holding(self, now: float, focus_payload: dict) -> bool:
-        if self.hold_until is None or now >= self.hold_until:
-            if self.hold_until is not None and now >= self.hold_until:
-                self.hold_until = None
-                self.rotation_anchor = now
-                self.rotation_ids = None
-            return False
-        return focus_payload.get("session_id") == self.hold_session
 
     def head(self, path: Path) -> SessionView:
         stat = path.stat()

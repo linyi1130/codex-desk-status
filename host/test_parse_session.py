@@ -13,8 +13,6 @@ from pathlib import Path
 import codex_status
 import parse_session
 from codex_status import (
-    COMPLETION_HOLD_SECONDS,
-    PAGE_DWELL_SECONDS,
     Engine,
     Handler,
     Service,
@@ -503,9 +501,9 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(first["status"], "running")
             self.assertEqual(first["label"], "执行中 · 思考中")
             self.assertEqual(first["page_index"], 1)
-            self.assertEqual(first["page_count"], 4)
+            self.assertEqual(first["page_count"], 1)
             self.assertEqual(first["project_name"], "NiceShot")
-            self.assertIn("1/4", first["footer"])
+            self.assertNotIn("1/4", first["footer"])
             blob = json.dumps(first, ensure_ascii=False)
             self.assertNotIn("sk-child-secret", blob)
             self.assertNotIn("do-not-leak-prompt", blob)
@@ -527,25 +525,14 @@ class MainWindowSelectionTest(unittest.TestCase):
                 )
             os.utime(edit_path, (NOW + 5, NOW + 5))
             os.utime(day / "rollout-foreign.jsonl", (NOW + 6, NOW + 6))
-            child_page = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
-            self.assertEqual(child_page["session_file"], "rollout-edit.jsonl")
-            self.assertEqual(child_page["session_id"], "child-edit")
-            self.assertEqual(child_page["context_used_tokens"], 410000)
-            self.assertEqual(child_page["label"], "执行中 · 编辑文件")
-            self.assertEqual(child_page["page_index"], 2)
-            self.assertEqual(child_page["page_count"], 4)
-            self.assertNotIn("secret patch body", json.dumps(child_page, ensure_ascii=False))
-
-            sibling = engine.payload(home, NOW + 2 * PAGE_DWELL_SECONDS, TZ, None)
-            self.assertEqual(sibling["session_id"], "child-shell")
-            self.assertEqual(sibling["context_used_tokens"], 300000)
-            self.assertNotEqual(sibling["context_used_tokens"], 218000)
-
-            back = engine.payload(home, NOW + 4 * PAGE_DWELL_SECONDS, TZ, None)
-            self.assertEqual(back["session_file"], "rollout-main.jsonl")
-            self.assertEqual(back["context_used_tokens"], 218000)
-            self.assertEqual(back["weekly_used_percent"], 22)
-            self.assertEqual(back["page_index"], 1)
+            later = engine.payload(home, NOW + 30, TZ, None)
+            self.assertEqual(later["session_file"], "rollout-main.jsonl")
+            self.assertEqual(later["session_id"], "main-chat")
+            self.assertEqual(later["context_used_tokens"], 218000)
+            self.assertEqual(later["label"], "执行中 · 思考中")
+            self.assertEqual(later["page_count"], 1)
+            self.assertNotIn("secret patch body", json.dumps(later, ensure_ascii=False))
+            self.assertNotIn("执行中 · 编辑文件", later["label"])
 
     def _running_pair(self, root: Path) -> Path:
         day = root / ".codex" / "sessions" / "2026" / "11" / "05"
@@ -592,7 +579,7 @@ class MainWindowSelectionTest(unittest.TestCase):
                 started = engine.payload(home, NOW, TZ, None)
                 self.assertEqual(started["status"], "running")
                 self.assertEqual(started["session_id"], "main-chat")
-                self.assertEqual(started["page_count"], 2)
+                self.assertEqual(started["page_count"], 1)
                 main_path = day / "rollout-main.jsonl"
                 with main_path.open("a", encoding="utf-8") as handle:
                     handle.write(
@@ -606,21 +593,15 @@ class MainWindowSelectionTest(unittest.TestCase):
                 self.assertEqual(held["color"], color)
                 self.assertEqual(held["context_used_tokens"], 218000)
                 self.assertEqual(held["weekly_used_percent"], 22)
-                self.assertEqual(held["page_count"], 2)
+                self.assertEqual(held["page_count"], 1)
                 if status == "complete":
                     self.assertEqual(held["turn_elapsed_text"], "3分0秒")
-                child_live = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
-                self.assertEqual(child_live["session_id"], "child")
-                self.assertEqual(child_live["status"], "running")
-                self.assertEqual(child_live["page_count"], 2)
-                still = engine.payload(home, NOW + 1 + COMPLETION_HOLD_SECONDS - 1, TZ, None)
+                still = engine.payload(home, NOW + 30, TZ, None)
+                self.assertEqual(still["session_id"], "main-chat")
                 self.assertEqual(still["label"], label)
+                self.assertEqual(still["status"], status)
                 self.assertEqual(still["context_used_tokens"], 218000)
-                resumed = engine.payload(home, NOW + 1 + COMPLETION_HOLD_SECONDS, TZ, None)
-                self.assertEqual(resumed["session_id"], "child")
-                self.assertEqual(resumed["status"], "running")
-                self.assertEqual(resumed["context_used_tokens"], 410000)
-                self.assertEqual(resumed["page_count"], 1)
+                self.assertEqual(still["page_count"], 1)
 
         finish("task_complete", "已完成", "complete", "green")
         finish("turn_aborted", "已中断", "interrupted", "red")
@@ -733,15 +714,16 @@ class MainWindowSelectionTest(unittest.TestCase):
             engine = Engine()
             home = Path(tmp) / ".codex"
             page = engine.payload(home, NOW, TZ, None)
-            later = engine.payload(home, NOW + 20, TZ, None)
-            self.assertEqual(page["session_id"], "live")
-            self.assertEqual(page["status"], "running")
-            self.assertEqual(page["label"], "执行中 · 跑命令")
-            self.assertEqual(page["context_used_tokens"], 218000)
+            later = engine.payload(home, NOW + 30, TZ, None)
+            self.assertEqual(page["session_id"], "finished")
+            self.assertEqual(page["status"], "complete")
+            self.assertEqual(page["label"], "已完成")
             self.assertEqual(page["page_count"], 1)
-            self.assertEqual(later["session_id"], "live")
+            self.assertEqual(later["session_id"], "finished")
+            self.assertEqual(later["status"], "complete")
             self.assertEqual(later["page_count"], 1)
             self.assertNotEqual(page["context_used_tokens"], 410000)
+            self.assertNotEqual(page["context_used_tokens"], 218000)
 
     def test_nested_source_and_thread_source_cannot_become_the_window(self) -> None:
         import tempfile
@@ -810,12 +792,12 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(payload["context_used_tokens"], 218000)
             self.assertEqual(payload["label"], "执行中 · 思考中")
             self.assertEqual(payload["status"], "running")
-            self.assertEqual(payload["page_count"], 2)
-            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
-            self.assertEqual(child["session_id"], "nested")
-            self.assertEqual(child["label"], "执行中 · 编辑文件")
-            self.assertEqual(child["context_used_tokens"], 410000)
-            self.assertEqual(child["page_index"], 2)
+            self.assertEqual(payload["page_count"], 1)
+            later = engine.payload(home, NOW + 30, TZ, None)
+            self.assertEqual(later["session_id"], "main-chat")
+            self.assertEqual(later["label"], "执行中 · 思考中")
+            self.assertEqual(later["context_used_tokens"], 218000)
+            self.assertEqual(later["page_count"], 1)
 
     def test_child_keeps_a_quiet_main_turn_from_looking_idle(self) -> None:
         import tempfile
@@ -855,11 +837,13 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(payload["label"], "执行中 · 思考中")
             self.assertEqual(payload["context_used_tokens"], 218000)
             self.assertEqual(payload["session_file"], "rollout-main.jsonl")
-            self.assertEqual(payload["page_count"], 2)
-            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
-            self.assertEqual(child["session_id"], "child")
-            self.assertEqual(child["label"], "执行中 · 跑命令")
-            self.assertEqual(child["context_used_tokens"], 410000)
+            self.assertEqual(payload["page_count"], 1)
+            later = engine.payload(home, NOW + 30, TZ, None)
+            self.assertEqual(later["session_id"], "main-chat")
+            self.assertEqual(later["session_file"], "rollout-main.jsonl")
+            self.assertEqual(later["label"], "执行中 · 思考中")
+            self.assertEqual(later["context_used_tokens"], 218000)
+            self.assertEqual(later["page_count"], 1)
 
     def test_quota_donor_still_works_and_child_quota_does_not_replace_it(self) -> None:
         import tempfile
@@ -941,21 +925,17 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(held["session_file"], "rollout-main.jsonl")
 
             child_tool = HookHint(NOW + 1, "running", "编辑文件", None, "child")
-            opened = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, child_tool)
+            opened = engine.payload(home, NOW + 12, TZ, child_tool)
             self.assertEqual(opened["session_id"], "main-chat")
             self.assertEqual(opened["label"], "执行中 · 思考中")
             self.assertEqual(opened["context_used_tokens"], 218000)
-            hinted = engine.payload(home, NOW + 2 * PAGE_DWELL_SECONDS, TZ, child_tool)
-            self.assertEqual(hinted["session_id"], "child")
-            self.assertEqual(hinted["label"], "执行中 · 编辑文件")
-            self.assertIsNone(hinted["context_used_tokens"])
-            self.assertTrue(hinted["hook_fresh"])
-            parent = engine.payload(home, NOW + 3 * PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(opened["page_count"], 1)
+            parent = engine.payload(home, NOW + 30, TZ, None)
             self.assertEqual(parent["session_id"], "main-chat")
             self.assertEqual(parent["label"], "执行中 · 思考中")
             self.assertEqual(parent["context_used_tokens"], 218000)
 
-            done_at = NOW + 3 * PAGE_DWELL_SECONDS + 1
+            done_at = NOW + 31
             main_done = HookHint(done_at, "complete", "", None, "main-chat")
             finished = engine.payload(home, done_at, TZ, main_done)
             self.assertEqual(finished["status"], "complete")
@@ -1131,16 +1111,16 @@ class SummaryTest(unittest.TestCase):
             engine = Engine()
             home = Path(tmp) / ".codex"
             parent = engine.payload(home, NOW, TZ, None)
-            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            later = engine.payload(home, NOW + 30, TZ, None)
             self.assertEqual(parent["session_id"], "main-chat")
             self.assertEqual(parent["summary"], "请把桌面状态改一下")
             self.assertEqual(parent["window_name"], "主窗口")
             self.assertEqual(parent["context_used_tokens"], 218000)
-            self.assertEqual(child["session_id"], "child")
-            self.assertEqual(child["summary"], "fix battery")
-            self.assertEqual(child["window_name"], "fix battery")
-            self.assertEqual(child["context_used_tokens"], 410000)
-            self.assertEqual(child["page_index"], 2)
+            self.assertEqual(parent["page_count"], 1)
+            self.assertEqual(later["session_id"], "main-chat")
+            self.assertEqual(later["summary"], "请把桌面状态改一下")
+            self.assertNotEqual(later["summary"], "fix battery")
+            self.assertEqual(later["page_count"], 1)
 
     def test_sidebar_title_is_shared_by_parent_and_child_pages(self) -> None:
         import tempfile
@@ -1209,13 +1189,15 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(titles["main-chat"], "请查桌面状态")
             engine = Engine()
             parent = engine.payload(root, NOW, TZ, None)
-            child = engine.payload(root, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            later = engine.payload(root, NOW + 30, TZ, None)
             self.assertEqual(parent["window_name"], "请查桌面状态")
             self.assertEqual(parent["summary"], "请把桌面状态改一下")
-            self.assertEqual(child["session_id"], "child")
-            self.assertEqual(child["window_name"], "请查桌面状态")
-            self.assertEqual(child["summary"], "fix battery")
-            self.assertNotEqual(child["window_name"], child["summary"])
+            self.assertEqual(parent["session_id"], "main-chat")
+            self.assertEqual(later["session_id"], "main-chat")
+            self.assertEqual(later["window_name"], "请查桌面状态")
+            self.assertEqual(later["summary"], "请把桌面状态改一下")
+            self.assertNotEqual(later["window_name"], later["summary"])
+            self.assertEqual(later["page_count"], 1)
 
 
 class LiveTurnTest(unittest.TestCase):
@@ -1290,7 +1272,7 @@ class LiveTurnTest(unittest.TestCase):
         self.assertEqual(payload["status"], "complete")
         self.assertNotIn("still working", json.dumps(payload, ensure_ascii=False))
 
-    def test_parent_complete_still_serves_a_running_child(self) -> None:
+    def test_completed_main_stays_up_while_a_child_is_still_running(self) -> None:
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1334,11 +1316,16 @@ class LiveTurnTest(unittest.TestCase):
             )
             engine = Engine()
             page = engine.payload(root, NOW, TZ, None)
-            self.assertEqual(page["session_id"], "child")
-            self.assertEqual(page["status"], "running")
-            self.assertEqual(page["summary"], "coverage impl")
-            self.assertEqual(page["context_used_tokens"], 410000)
-            self.assertNotEqual(page["label"], "已完成")
+            self.assertEqual(page["session_id"], "parent")
+            self.assertEqual(page["status"], "complete")
+            self.assertEqual(page["label"], "已完成")
+            self.assertEqual(page["window_name"], "主窗口")
+            self.assertEqual(page["page_count"], 1)
+            later = engine.payload(root, NOW + 30, TZ, None)
+            self.assertEqual(later["session_id"], "parent")
+            self.assertEqual(later["status"], "complete")
+            self.assertEqual(later["page_count"], 1)
+            self.assertNotIn("coverage impl", json.dumps(later, ensure_ascii=False))
 
 
 class FontCoverageTest(unittest.TestCase):

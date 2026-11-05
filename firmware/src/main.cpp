@@ -172,6 +172,5 @@ void loop() {
   if (fetched || batteryChanged || uiMinuteChanged()) {
     uiPaint(false);
   }
-  // Running turns need a tighter loop so the 2s poll stays on time.
-  delay((gState.link == LINK_OK && gState.running) ? 40 : 250);
+  delay(250);
 }

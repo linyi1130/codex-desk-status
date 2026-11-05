@@ -16,9 +16,12 @@
 #error "Copy firmware/include/config.example.h to firmware/include/config.h before building."
 #endif
 
-#ifndef STATUS_POLL_IDLE_MS
-#define STATUS_POLL_IDLE_MS 12000
-#endif
+// A local config.h copied from an older example still defines a 2s poll.
+// This desk only needs to see whether the main chat has finished.
+#undef STATUS_POLL_MS
+#define STATUS_POLL_MS 12000
+#undef STATUS_POLL_IDLE_MS
+#define STATUS_POLL_IDLE_MS 30000
 
 namespace {
 
