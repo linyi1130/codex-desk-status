@@ -543,13 +543,16 @@ class Service:
                 self.subscribers.remove(client)
 
     def publish(self) -> dict:
+        # Serialize the whole read-compute-write cycle: the poller thread and a
+        # hook POST (its own HTTP handler thread) both call this, and the
+        # SessionFollower / Engine caches are not thread-safe.
+        now = time.time()
         with self.lock:
             hook = self.hook
             tz = self.tz_offset
-        payload = self.engine.payload(self.codex_home, time.time(), tz, hook)
-        with self.lock:
+            payload = self.engine.payload(self.codex_home, now, tz, hook)
             self.payload = payload
-            reason = self.gate.consider(payload, time.time())
+            reason = self.gate.consider(payload, now)
             subscribers = list(self.subscribers) if reason else []
         if reason:
             blob = sse_bytes(payload)

@@ -22,7 +22,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
-WEEKLY_MINUTES = 24 * 60
+# A quota window that lasts at least a full day is rendered as 周额度. Codex
+# only emits two windows: ~5 hours (300) and a week (10080, sometimes 10079),
+# so this threshold just needs to sit between them.
+DAY_MINUTES = 24 * 60
 STALE_RUNNING_SECONDS = 30 * 60
 QUOTA_HOT_PERCENT = 90.0
 
@@ -1013,7 +1016,7 @@ def classify_windows(primary: Window | None, secondary: Window | None) -> tuple[
         minutes = window.window_minutes
         if minutes is None:
             unknown.append(window)
-        elif minutes >= WEEKLY_MINUTES:
+        elif minutes >= DAY_MINUTES:
             weekly = window
         elif minutes >= 12 * 60:
             weekly = window

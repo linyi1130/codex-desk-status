@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <driver/gpio.h>
+#include <driver/rtc_io.h>
 #include <esp_sleep.h>
 
 #include <stdio.h>
@@ -337,10 +338,13 @@ void paintTo(Gfx& gfx) {
 DeskState gState;
 
 void uiBegin() {
-  // Deep sleep latches GPIO15 and the backlight. A normal boot is a no-op.
+  // Deep sleep latches GPIO15 (RTC) and the backlight (digital). Release both
+  // latches and hand GPIO15 back to the digital IO MUX before re-driving the
+  // panel, otherwise a wake keeps the old low level.
   gpio_deep_sleep_hold_dis();
-  gpio_hold_dis(static_cast<gpio_num_t>(PIN_POWER_ON));
   gpio_hold_dis(static_cast<gpio_num_t>(PIN_BACKLIGHT));
+  rtc_gpio_hold_dis(static_cast<gpio_num_t>(PIN_POWER_ON));
+  rtc_gpio_deinit(static_cast<gpio_num_t>(PIN_POWER_ON));
   tft.beginDesk(DISPLAY_ROTATION, BACKLIGHT);
   if (tft.width() != kWidth || tft.height() != kHeight) {
     tft.setRotation(DISPLAY_ROTATION);
@@ -359,15 +363,22 @@ void uiShutdown() {
   tft.setBrightness(0);
   tft.sleep();
   ledcDetachPin(PIN_BACKLIGHT);
+
+  // Backlight (GPIO38, not an RTC GPIO): latch a digital LOW through deep sleep.
   pinMode(PIN_BACKLIGHT, OUTPUT);
   digitalWrite(PIN_BACKLIGHT, LOW);
-  pinMode(PIN_POWER_ON, OUTPUT);
-  digitalWrite(PIN_POWER_ON, LOW);
   gpio_set_level(static_cast<gpio_num_t>(PIN_BACKLIGHT), 0);
-  gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_ON), 0);
   gpio_hold_en(static_cast<gpio_num_t>(PIN_BACKLIGHT));
-  gpio_hold_en(static_cast<gpio_num_t>(PIN_POWER_ON));
   gpio_deep_sleep_hold_en();
+
+  // Panel power (GPIO15, an RTC GPIO). The digital pad hold above does not fix
+  // the level of an RTC pin through deep sleep, so drive it through the RTC IO
+  // and latch it there. This keeps the panel power off on every sleep, not just
+  // the first one after a cold boot.
+  rtc_gpio_init(static_cast<gpio_num_t>(PIN_POWER_ON));
+  rtc_gpio_set_direction(static_cast<gpio_num_t>(PIN_POWER_ON), RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_ON), 0);
+  rtc_gpio_hold_en(static_cast<gpio_num_t>(PIN_POWER_ON));
 }
 
 void uiNoteComplete(const char* previousStatus) {

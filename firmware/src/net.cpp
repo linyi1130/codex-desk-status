@@ -364,13 +364,16 @@ bool netLoop(bool force) {
     enableModemSleep();
     modemSleepOn = true;
   }
+  const LinkState before = gState.link;
+  bool changed = false;
   if (streamLive) {
-    return pumpStream();
-  }
-  if (force || now - lastAttempt >= reconnectMs) {
+    changed = pumpStream();
+  } else if (force || now - lastAttempt >= reconnectMs) {
     lastAttempt = now;
     if (!sidecarHost[0]) discover();
-    return openOrFetch(true);
+    changed = openOrFetch(true);
   }
-  return false;
+  // markLost() flips gState.link without painting; surface that change here so
+  // the "连接中断" screen appears immediately instead of on the next minute tick.
+  return changed || gState.link != before;
 }
