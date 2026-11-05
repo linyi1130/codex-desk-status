@@ -41,6 +41,8 @@ struct DeskState {
 extern DeskState gState;
 
 void uiBegin();
+// Backlight latched off and the panel power switch opened, for deep sleep.
+void uiShutdown();
 void uiPaint(bool flashFirst);
 void uiNoteComplete(const char* previousStatus);
 // True when the drawn HH:MM is no longer the one on screen.

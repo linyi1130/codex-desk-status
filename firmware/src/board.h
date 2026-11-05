@@ -19,6 +19,10 @@
 #include <LovyanGFX.hpp>
 
 static constexpr int PIN_POWER_ON = 15;
+static constexpr int PIN_BACKLIGHT = 38;
+// Button 1 is the BOOT key. A short press deep-sleeps; the same key wakes.
+static constexpr int PIN_BUTTON_BOOT = 0;
+// Button 2. Demo frames use this. It does not sleep the board.
 static constexpr int PIN_BUTTON_USER = 14;
 // LilyGO examples/factory/pin_config.h: PIN_BAT_VOLT. ADC1 channel, safe with Wi-Fi.
 static constexpr int PIN_BAT_VOLT = 4;

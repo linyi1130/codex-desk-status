@@ -1,5 +1,8 @@
 #include "ui.h"
 
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -334,6 +337,10 @@ void paintTo(Gfx& gfx) {
 DeskState gState;
 
 void uiBegin() {
+  // Deep sleep latches GPIO15 and the backlight. A normal boot is a no-op.
+  gpio_deep_sleep_hold_dis();
+  gpio_hold_dis(static_cast<gpio_num_t>(PIN_POWER_ON));
+  gpio_hold_dis(static_cast<gpio_num_t>(PIN_BACKLIGHT));
   tft.beginDesk(DISPLAY_ROTATION, BACKLIGHT);
   if (tft.width() != kWidth || tft.height() != kHeight) {
     tft.setRotation(DISPLAY_ROTATION);
@@ -346,6 +353,21 @@ void uiBegin() {
     spriteReady = canvas.createSprite(kWidth, kHeight) != nullptr;
   }
   uiPaint(false);
+}
+
+void uiShutdown() {
+  tft.setBrightness(0);
+  tft.sleep();
+  ledcDetachPin(PIN_BACKLIGHT);
+  pinMode(PIN_BACKLIGHT, OUTPUT);
+  digitalWrite(PIN_BACKLIGHT, LOW);
+  pinMode(PIN_POWER_ON, OUTPUT);
+  digitalWrite(PIN_POWER_ON, LOW);
+  gpio_set_level(static_cast<gpio_num_t>(PIN_BACKLIGHT), 0);
+  gpio_set_level(static_cast<gpio_num_t>(PIN_POWER_ON), 0);
+  gpio_hold_en(static_cast<gpio_num_t>(PIN_BACKLIGHT));
+  gpio_hold_en(static_cast<gpio_num_t>(PIN_POWER_ON));
+  gpio_deep_sleep_hold_en();
 }
 
 void uiNoteComplete(const char* previousStatus) {

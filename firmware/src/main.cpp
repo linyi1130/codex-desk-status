@@ -1,4 +1,8 @@
 #include <Arduino.h>
+#include <WiFi.h>
+
+#include <driver/rtc_io.h>
+#include <esp_sleep.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +57,41 @@ const DemoFrame kFrames[] = {
 uint8_t demoIndex = 0;
 uint32_t demoStamp = 0;
 bool buttonDown = false;
+// The wake press is still down when setup() runs. Ignore it until release.
+bool bootSeenRelease = false;
+uint32_t bootDownAt = 0;
+
+bool consumeSleepPress() {
+  const bool down = digitalRead(PIN_BUTTON_BOOT) == LOW;
+  if (!bootSeenRelease) {
+    if (!down) bootSeenRelease = true;
+    return false;
+  }
+  const uint32_t now = millis();
+  if (!down) {
+    const bool slept = bootDownAt != 0 && now - bootDownAt >= 40;
+    bootDownAt = 0;
+    return slept;
+  }
+  if (bootDownAt == 0) bootDownAt = now;
+  return false;
+}
+
+void enterDeepSleep() {
+  Serial.println("deep sleep");
+  Serial.flush();
+  uiShutdown();
+  if (!DEMO_MODE) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+  }
+  // Wake when BOOT is pressed (active low). The pin is high before we sleep,
+  // so a finger still on the key cannot immediately wake and sleep again.
+  rtc_gpio_pullup_en(GPIO_NUM_0);
+  rtc_gpio_pulldown_dis(GPIO_NUM_0);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+  esp_deep_sleep_start();
+}
 
 void applyBattery(const BatteryState& reading) {
   gState.batteryKind = reading.kind;
@@ -128,7 +167,11 @@ bool userPressed() {
 void setup() {
   Serial.begin(115200);
   delay(50);
+  pinMode(PIN_BUTTON_BOOT, INPUT_PULLUP);
   pinMode(PIN_BUTTON_USER, INPUT_PULLUP);
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("wake");
+  }
   batteryBegin();
   if (!DEMO_MODE) {
     applyBattery(batteryRead());
@@ -144,6 +187,9 @@ void setup() {
 }
 
 void loop() {
+  if (consumeSleepPress()) {
+    enterDeepSleep();
+  }
   const bool pressed = userPressed();
   if (DEMO_MODE) {
     if (pressed || millis() - demoStamp > 4000) {
@@ -172,5 +218,9 @@ void loop() {
   if (fetched || batteryChanged || uiMinuteChanged()) {
     uiPaint(false);
   }
-  delay(250);
+  // The radio stays idle here. Sample BOOT often enough to catch a short press.
+  for (uint32_t waited = 0; waited < 250; waited += 20) {
+    if (consumeSleepPress()) enterDeepSleep();
+    delay(20);
+  }
 }
