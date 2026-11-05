@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """Rasterize the desk UI glyphs from Noto Sans SC into firmware/src/font_zh.cpp.
 
-The ESP32 build does not need the .otf. Re-run this if on-screen copy changes.
+The ESP32 build does not need the .otf. Re-run this if on-screen copy changes:
+
+    FONT_PATH=/tmp/fonts/NotoSansSC-Regular.otf python3 firmware/scripts/gen_font.py
+
+Characters are harvested from host/, hooks/, firmware/src, and firmware/include,
+plus TITLE_SEED below. Sidebar titles arrive at runtime from
+~/.codex/session_index.jsonl and are not in those trees. Do not read that
+file into this generator: it would bake private thread names into the repo.
+Extend TITLE_SEED when a new title needs glyphs that are still missing.
 """
 
 from __future__ import annotations
@@ -24,6 +32,30 @@ CANDIDATES = [
     "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
 ]
 
+# Glyphs for dynamic Codex sidebar titles. The first sentence is a real
+# title the board must render. The rest are common title words so the next
+# short name is less likely to show missing boxes. Digits and ASCII
+# parentheses are already included via the basic Latin set.
+TITLE_SEED = """
+查明 10 处模型跳变
+查明 10 处模型跳变 (2)
+修复实现添加删除更新检查测试优化调整整理补充完善排查解决处理分析对比验证确认
+取消保存打开关闭显示隐藏连接断开失败成功错误警告提示输入输出
+文件目录路径配置参数环境依赖版本发布部署构建编译运行调试日志记录跟踪监控
+性能内存线程进程网络请求响应超时重试缓存数据查询插入修改接口协议格式
+解析序列化压缩加密签名权限认证登录注册用户密码令牌会话窗口页面按钮菜单
+列表表格图表进度摘要标题内容状态结果原因方案步骤说明文档注释示例样例
+预览截图录屏动画字体颜色布局对齐间距边框阴影圆角滚动分页轮播旋转
+完成中断等待思考编辑搜索生成图片命令额度上下文电量电池充电无线
+崩溃异常堆栈回归兼容迁移回滚合并冲突分支提交推送拉取克隆克隆仓库
+设计审查覆盖率单元集成端到端快照基准火焰图瓶颈泄漏抖动卡顿延迟吞吐
+重构重命名抽取内联删除死代码补齐缺漏对齐接口契约枚举常量宏模板泛型
+异步回调队列锁竞争死锁竞态条件幂等重放去重限流熔断降级扩容缩容
+模型推理训练微调量化蒸馏提示词词元采样温度上下文窗口幻觉对齐评测
+跳变漂移偏移缩放归一化特征嵌入向量矩阵卷积注意力解码编码
+查明核对定位复现根因修复验证回归发布说明变更记录问题单缺陷改进
+"""
+
 
 def find_font() -> str:
     for candidate in CANDIDATES:
@@ -36,6 +68,11 @@ def collect_codepoints() -> list[int]:
     chars = set(range(32, 127))
     chars.add(0x00B7)  # ·
     chars.add(0x2026)  # …
+    chars.add(0xFF08)  # （
+    chars.add(0xFF09)  # ）
+    for char in TITLE_SEED:
+        if ord(char) > 127:
+            chars.add(ord(char))
     roots = [
         ROOT / "host",
         ROOT / "hooks",
