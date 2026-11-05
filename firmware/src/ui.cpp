@@ -24,7 +24,7 @@ constexpr int kDotCx = 20;
 constexpr int kDotCy = 12;
 constexpr int kLabel1Y = 24;
 constexpr int kBar1Y = 42;
-constexpr int kBarH = 10;
+constexpr int kBarH = 6;
 constexpr int kSub1Y = 54;
 constexpr int kLabel2Y = 70;
 constexpr int kBar2Y = 88;
@@ -291,7 +291,12 @@ void paintTo(Gfx& gfx) {
 
   drawText(gfx, FONT_UI, kPad, kLabel2Y, "上下文", kText, kWidth, kHeight);
   percentText(pct, sizeof(pct), context);
-  drawText(gfx, FONT_NUM, kRight - textWidth(FONT_NUM, pct), kLabel2Y + (FONT_UI.lineHeight - FONT_NUM.lineHeight) / 2, pct, kWhite, kWidth, kHeight);
+  const int pctX = kRight - textWidth(FONT_NUM, pct);
+  if (showMeters && gState.windowName[0]) {
+    const int nameX = kPad + textWidth(FONT_UI, "上下文") + 6;
+    drawTextFit(gfx, FONT_SUB, nameX, kLabel2Y + 3, gState.windowName, kDim, pctX - 6, kHeight);
+  }
+  drawText(gfx, FONT_NUM, pctX, kLabel2Y + (FONT_UI.lineHeight - FONT_NUM.lineHeight) / 2, pct, kWhite, kWidth, kHeight);
   drawBar(gfx, kBar2Y, context);
   drawTextFit(gfx, FONT_SUB, kPad, kSub2Y, contextSub, kDim, kRight, kHeight);
 

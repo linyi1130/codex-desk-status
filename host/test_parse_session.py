@@ -1013,8 +1013,11 @@ class SummaryTest(unittest.TestCase):
         parent_payload = parse_session.build_payload(parent, NOW, tz_offset_seconds=TZ, session_file="p.jsonl", file_mtime=NOW)
         child_payload = parse_session.build_payload(child, NOW, tz_offset_seconds=TZ, session_file="c.jsonl", file_mtime=NOW)
         self.assertEqual(parent_payload["summary"], "请把桌面状态改一下")
+        self.assertEqual(parent_payload["window_name"], "主窗口")
         self.assertEqual(child_payload["summary"], "fix battery")
+        self.assertEqual(child_payload["window_name"], "fix battery")
         self.assertNotEqual(child_payload["summary"], parent_payload["summary"])
+        self.assertNotEqual(child_payload["window_name"], parent_payload["window_name"])
 
     def test_child_without_task_name_uses_the_middle_agent_line(self) -> None:
         shared_agent = "\n".join(["Shared opening line.", "请查一下本周额度", "Shared closing line."])
@@ -1043,6 +1046,41 @@ class SummaryTest(unittest.TestCase):
         )
         payload = parse_session.build_payload(view, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
         self.assertIsNone(payload["summary"])
+        self.assertEqual(payload["window_name"], "主窗口")
+
+    def test_tool_json_does_not_replace_the_user_request(self) -> None:
+        tool = '[{"questionItemId":"[\\"request_user_input_async\\"]","question":"sk-test-do-not-leak"}]'
+        view = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"main","thread_source":"user","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:26:00Z","type":"event_msg","payload":{"type":"user_message","message":"请把桌面状态改一下"}}',
+                    '{"timestamp":"2026-11-05T00:27:00Z","type":"event_msg","payload":{"type":"user_message","message":'
+                    + json.dumps(tool)
+                    + "}}",
+                ]
+            )
+        )
+        payload = parse_session.build_payload(view, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
+        self.assertEqual(payload["summary"], "请把桌面状态改一下")
+        self.assertEqual(payload["window_name"], "主窗口")
+        blob = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("questionItemId", blob)
+        self.assertNotIn("request_user_input_async", blob)
+        self.assertNotIn("sk-test-do-not-leak", blob)
+
+    def test_only_tool_json_omits_the_summary(self) -> None:
+        view = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"main","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:26:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[{\\"questionItemId\\":\\"request_user_input_async\\"}]"}]}}',
+                ]
+            )
+        )
+        payload = parse_session.build_payload(view, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
+        self.assertIsNone(payload["summary"])
+        self.assertNotIn("questionItemId", json.dumps(payload, ensure_ascii=False))
 
     def test_status_pages_keep_separate_summaries(self) -> None:
         import tempfile
@@ -1091,9 +1129,11 @@ class SummaryTest(unittest.TestCase):
             child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
             self.assertEqual(parent["session_id"], "main-chat")
             self.assertEqual(parent["summary"], "请把桌面状态改一下")
+            self.assertEqual(parent["window_name"], "主窗口")
             self.assertEqual(parent["context_used_tokens"], 218000)
             self.assertEqual(child["session_id"], "child")
             self.assertEqual(child["summary"], "fix battery")
+            self.assertEqual(child["window_name"], "fix battery")
             self.assertEqual(child["context_used_tokens"], 410000)
             self.assertEqual(child["page_index"], 2)
 

@@ -14,7 +14,7 @@ import gen_font
 W, H = 320, 170
 PAD, RIGHT = 14, 306
 STATUS_Y, DOT = 4, (20, 12)
-LABEL1_Y, BAR1_Y, BAR_H, SUB1_Y = 24, 42, 10, 54
+LABEL1_Y, BAR1_Y, BAR_H, SUB1_Y = 24, 42, 6, 54
 LABEL2_Y, BAR2_Y, SUB2_Y = 70, 88, 100
 SUMMARY_Y = 116
 FOOT_Y = 150
@@ -164,6 +164,11 @@ def render(face_ui, face_sub, face_num, state):
     draw_text(image, face_sub, PAD, SUB1_Y, state["weekly_sub"], DIM, RIGHT)
     draw_text(image, face_ui, PAD, LABEL2_Y, "上下文", TEXT, W)
     pct = "--" if state["context"] < 0 else f"{int(state['context'] + 0.5)}%"
+    pct_x = RIGHT - face_num.width(pct)
+    window_name = state.get("window_name") or ""
+    if window_name and state["link"] == "ok":
+        name_x = PAD + face_ui.width("上下文") + 6
+        draw_text(image, face_sub, name_x, LABEL2_Y + 3, window_name, DIM, pct_x - 6)
     draw_text(image, face_num, RIGHT - face_num.width(pct), LABEL2_Y + (face_ui.line_height - face_num.line_height) // 2, pct, WHITE, W)
     rounded(draw, (PAD, BAR2_Y, RIGHT, BAR2_Y + BAR_H), BAR_H // 2, TRACK)
     if state["context"] > 0:
@@ -196,11 +201,11 @@ def main():
         Face(attach_levels(num_g, num_b), num_h),
     )
     states = [
-        ("running", {"link": "ok", "label": "执行中 · 跑命令", "color": "orange", "weekly": 16, "weekly_sub": "约 6 天后重置 · Pro", "context": 73.47, "context_sub": "349k / 475k tokens", "footer": "NiceShot · 本轮已运行 4分12秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "page": "2/4", "summary": "请把桌面状态改一下"}),
-        ("thinking", {"link": "ok", "label": "执行中 · 思考中", "color": "orange", "weekly": 16, "weekly_sub": "约 6 天后重置 · Pro", "context": 48, "context_sub": "228k / 475k tokens", "footer": "NiceShot · 本轮已运行 18秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请把桌面状态改一下"}),
-        ("complete", {"link": "ok", "label": "已完成", "color": "green", "weekly": 12, "weekly_sub": "约 6 天后重置 · Plus", "context": 2.53, "context_sub": "12k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分30秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请查一下本周额度"}),
-        ("interrupted", {"link": "ok", "label": "已中断", "color": "red", "weekly": 20, "weekly_sub": "约 6 天后重置 · Pro", "context": 4.23, "context_sub": "20.1k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分10秒", "clock": "08:27", "battery_kind": "level", "battery": 12, "battery_text": "12%", "summary": "请查一下本周额度"}),
-        ("quota", {"link": "ok", "label": "额度将尽 · 思考中", "color": "red", "weekly": 96, "weekly_sub": "约 6 天后重置 · Pro", "context": 95.16, "context_sub": "452k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分6秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请把桌面状态改一下"}),
+        ("running", {"link": "ok", "label": "执行中 · 跑命令", "color": "orange", "weekly": 16, "weekly_sub": "约 6 天后重置 · Pro", "context": 73.47, "context_sub": "349k / 475k tokens", "footer": "NiceShot · 本轮已运行 4分12秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "page": "2/4", "summary": "请把桌面状态改一下", "window_name": "design review"}),
+        ("thinking", {"link": "ok", "label": "执行中 · 思考中", "color": "orange", "weekly": 16, "weekly_sub": "约 6 天后重置 · Pro", "context": 48, "context_sub": "228k / 475k tokens", "footer": "NiceShot · 本轮已运行 18秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请把桌面状态改一下", "window_name": "主窗口"}),
+        ("complete", {"link": "ok", "label": "已完成", "color": "green", "weekly": 12, "weekly_sub": "约 6 天后重置 · Plus", "context": 2.53, "context_sub": "12k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分30秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请查一下本周额度", "window_name": "主窗口"}),
+        ("interrupted", {"link": "ok", "label": "已中断", "color": "red", "weekly": 20, "weekly_sub": "约 6 天后重置 · Pro", "context": 4.23, "context_sub": "20.1k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分10秒", "clock": "08:27", "battery_kind": "level", "battery": 12, "battery_text": "12%", "summary": "请查一下本周额度", "window_name": "主窗口"}),
+        ("quota", {"link": "ok", "label": "额度将尽 · 思考中", "color": "red", "weekly": 96, "weekly_sub": "约 6 天后重置 · Pro", "context": 95.16, "context_sub": "452k / 475k tokens", "footer": "NiceShot · 本轮已运行 1分6秒", "clock": "08:27", "battery_kind": "level", "battery": 76, "battery_text": "76%", "summary": "请把桌面状态改一下", "window_name": "主窗口"}),
         ("stale", {"link": "stale", "label": "连接中断", "color": "red", "weekly": 16, "weekly_sub": "约 6 天后重置 · Pro", "context": 73.47, "context_sub": "349k / 475k tokens", "footer": "NiceShot · 上次更新 2 分钟前", "clock": "08:29", "battery_kind": "none", "battery": 0, "battery_text": "无电"}),
         ("offline", {"link": "wifi", "label": "未连接无线网络", "color": "red", "weekly": -1, "weekly_sub": "暂无数据", "context": -1, "context_sub": "暂无数据", "footer": "请检查无线网络", "clock": "--:--", "battery_kind": "usb", "battery": 0, "battery_text": "USB"}),
     ]

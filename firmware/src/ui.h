@@ -35,6 +35,7 @@ struct DeskState {
   int pageIndex = 1;
   int pageCount = 1;
   char summary[160] = "";
+  char windowName[48] = "";
 };
 
 extern DeskState gState;

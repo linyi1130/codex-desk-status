@@ -494,7 +494,32 @@ def _boilerplate_line(line: str) -> bool:
         return True
     if _SECRET_TEXT.search(line) or _SHELL_LINE.match(line):
         return True
+    if _structured_fragment(line):
+        return True
     return False
+
+
+def _structured_fragment(text: str) -> bool:
+    """Tool payloads and JSON wrappers are not the person's request.
+
+    Live user chats append ``request_user_input_async`` records whose text
+    starts with ``[{"questionItemId":...``. Those must not become the summary.
+    """
+    sample = text.lstrip()
+    if not sample:
+        return False
+    if sample[0] in "[{":
+        return True
+    lowered = sample.lower()
+    markers = (
+        "questionitemid",
+        "request_user_input_async",
+        "request_user_input",
+        "\"tool_input\"",
+        "\"arguments\"",
+        "function_call",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _clip_summary(text: str) -> str:
@@ -574,7 +599,7 @@ def task_label(value: str | None) -> str | None:
 
 
 def note_user_text(view: SessionView, text: str | None) -> None:
-    if not text:
+    if not text or _structured_fragment(text):
         return
     excerpt = _pick_user_excerpt(text)
     if excerpt:
@@ -599,6 +624,29 @@ def note_goal(view: SessionView, payload: dict) -> None:
     excerpt = _pick_user_excerpt(objective)
     if excerpt and not view.user_summary:
         view.user_summary = excerpt
+
+
+_WINDOW_NAME_LIMIT = 18
+_MAIN_WINDOW_NAME = "主窗口"
+
+
+def window_name(view: SessionView) -> str | None:
+    """Short name for the context row. Each rollout uses its own task name.
+
+    Sub-agents show ``agent_path`` (Codex copies ``spawn_agent.task_name``
+    there, underscores as spaces). The user's chat has no task name, so it
+    is labeled 主窗口 instead of repeating the project name.
+    """
+    task = task_label(view.agent_path)
+    if task:
+        if len(task) <= _WINDOW_NAME_LIMIT:
+            return task
+        return task[: _WINDOW_NAME_LIMIT - 1].rstrip() + "…"
+    if is_child_session(view):
+        return None
+    if view.session_id or view.project_name or view.user_summary or view.last_event_at:
+        return _MAIN_WINDOW_NAME
+    return None
 
 
 def session_summary(view: SessionView) -> str | None:
@@ -1262,6 +1310,7 @@ def build_payload(
         "hook_fresh": hook_fresh,
         "footer": footer,
         "summary": session_summary(merged),
+        "window_name": window_name(merged),
         "message": None,
     }
 
@@ -1307,5 +1356,6 @@ def empty_payload(now: float, tz_offset_seconds: int | None = None, message: str
         "hook_fresh": False,
         "footer": "还没有会话",
         "summary": None,
+        "window_name": None,
         "message": message,
     }

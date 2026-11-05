@@ -512,7 +512,7 @@ function render(data) {
     <div class="row label"><div>本周额度</div><div class="pct">${weekly == null ? "--" : Math.round(weekly) + "%"}</div></div>
     <div class="track"><div class="fill" style="width:${w}%;background:${barColor(weekly)}"></div></div>
     <div class="sub">${esc(reset)}</div>
-    <div class="row label"><div>上下文</div><div class="pct">${context == null ? "--" : Math.round(context) + "%"}</div></div>
+    <div class="row label"><div>上下文${data.window_name ? " <span class=\"sub\">" + esc(data.window_name) + "</span>" : ""}</div><div class="pct">${context == null ? "--" : Math.round(context) + "%"}</div></div>
     <div class="track"><div class="fill" style="width:${c}%;background:${barColor(context)}"></div></div>
     <div class="sub">${esc(ctx)}</div>
     ${summary}
