@@ -16,6 +16,10 @@
 #error "Copy firmware/include/config.example.h to firmware/include/config.h before building."
 #endif
 
+#ifndef STATUS_POLL_IDLE_MS
+#define STATUS_POLL_IDLE_MS 12000
+#endif
+
 namespace {
 
 char sidecarUrl[160] = SIDECAR_URL;
@@ -23,6 +27,19 @@ uint32_t lastPoll = 0;
 uint32_t lastDiscover = 0;
 bool urlFromMdns = false;
 bool mdnsReady = false;
+
+void enableModemSleep() {
+  // WIFI_PS_MIN_MODEM is the same mode as WiFi.setSleep(true): beacon
+  // wakeups only, association kept. WIFI_PS_MAX_MODEM is not used.
+  WiFi.setSleep(WIFI_PS_MIN_MODEM);
+}
+
+uint32_t pollIntervalMs() {
+  if (gState.link == LINK_OK && strcmp(gState.status, "running") == 0) {
+    return STATUS_POLL_MS;
+  }
+  return STATUS_POLL_IDLE_MS;
+}
 
 void copyText(char* dest, size_t size, const char* value) {
   if (!value) value = "";
@@ -150,8 +167,8 @@ void netBegin() {
   uiPaint(false);
 
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
   WiFi.setHostname("codex-desk");
+  enableModemSleep();
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   const uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS) {
@@ -160,9 +177,11 @@ void netBegin() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("无线网络未连接");
     gState.link = LINK_WIFI;
+    lastPoll = millis();
     uiPaint(false);
     return;
   }
+  enableModemSleep();
   Serial.printf("已连接 %s\n", WiFi.localIP().toString().c_str());
   gState.link = LINK_SEARCH;
   copyText(gState.label, sizeof(gState.label), "正在查找电脑");
@@ -174,27 +193,37 @@ void netBegin() {
   uiPaint(false);
 }
 
-void netLoop(bool force) {
+bool netLoop(bool force) {
   const uint32_t now = millis();
+  static bool modemSleepOn = false;
   if (WiFi.status() != WL_CONNECTED) {
+    modemSleepOn = false;
+    const bool changed = gState.link != LINK_WIFI;
     gState.link = LINK_WIFI;
-    if (now - lastPoll > 8000) {
+    if (now - lastPoll > STATUS_POLL_IDLE_MS) {
       Serial.println("重试无线网络");
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
       lastPoll = now;
+      return true;
     }
-    return;
+    return changed;
+  }
+  if (!modemSleepOn) {
+    enableModemSleep();
+    modemSleepOn = true;
   }
   if (!urlFromMdns && (force || now - lastDiscover > 30000)) {
     discover();
     lastDiscover = now;
   }
-  if (force || now - lastPoll >= STATUS_POLL_MS) {
+  if (force || now - lastPoll >= pollIntervalMs()) {
     const bool ok = poll();
     lastPoll = now;
     if (!ok && urlFromMdns) {
       urlFromMdns = false;
     }
+    return true;
   }
+  return false;
 }

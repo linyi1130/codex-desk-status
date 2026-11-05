@@ -40,6 +40,7 @@ LGFX_Sprite canvas(&tft);
 bool spriteReady = false;
 bool flashPending = false;
 bool sawRunning = false;
+int paintedMinute = -2;
 
 uint16_t rgb(uint8_t r, uint8_t g, uint8_t b) {
   return static_cast<uint16_t>(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
@@ -73,6 +74,14 @@ uint16_t barColor(float percent) {
 long unixNow() {
   if (!gState.everSynced) return 0;
   return gState.unixBase + static_cast<long>((millis() - gState.syncMillis) / 1000UL);
+}
+
+int clockMinute() {
+  if (!gState.everSynced) return -1;
+  time_t shifted = static_cast<time_t>(unixNow() + gState.tzOffset);
+  struct tm parts {};
+  gmtime_r(&shifted, &parts);
+  return parts.tm_hour * 60 + parts.tm_min;
 }
 
 void formatClock(char* out, size_t size) {
@@ -363,4 +372,9 @@ void uiPaint(bool) {
   } else {
     paintTo(tft);
   }
+  paintedMinute = clockMinute();
+}
+
+bool uiMinuteChanged() {
+  return clockMinute() != paintedMinute;
 }

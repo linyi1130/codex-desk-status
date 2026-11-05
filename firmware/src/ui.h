@@ -43,3 +43,5 @@ extern DeskState gState;
 void uiBegin();
 void uiPaint(bool flashFirst);
 void uiNoteComplete(const char* previousStatus);
+// True when the drawn HH:MM is no longer the one on screen.
+bool uiMinuteChanged();

@@ -16,14 +16,17 @@
 // Used only when mDNS does not resolve. Include the /status path.
 #define SIDECAR_URL "http://192.168.1.50:8787/status"
 
+// While a turn is running. Pages rotate every 4s, so this stays short.
 #define STATUS_POLL_MS 2000
+// complete / interrupted / idle / offline / stale. The screen stays on.
+#define STATUS_POLL_IDLE_MS 12000
 #define WIFI_TIMEOUT_MS 15000
 
 // 1 or 3. If the picture is upside down, switch this.
 #define DISPLAY_ROTATION 1
 
-// 0-255. 220 is bright enough for a desk without a hotspot.
-#define BACKLIGHT 220
+// 0-255. 150 is readable on a desk. Raise this if the panel looks dim.
+#define BACKLIGHT 150
 
 // 1 cycles sample screens with no Wi-Fi, so you can check the panel
 // before the Mac sidecar is running. Set back to 0 for live data.

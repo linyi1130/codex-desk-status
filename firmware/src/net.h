@@ -1,4 +1,5 @@
 #pragma once
 
 void netBegin();
-void netLoop(bool force);
+// True when a poll or a link change may have altered what the screen shows.
+bool netLoop(bool force);

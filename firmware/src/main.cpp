@@ -153,17 +153,25 @@ void loop() {
     delay(20);
     return;
   }
-  netLoop(pressed);
-  static uint32_t lastDraw = 0;
+  const bool fetched = netLoop(pressed);
   static uint32_t lastBattery = 0;
   const uint32_t now = millis();
-  if (now - lastBattery >= 2000) {
+  bool batteryChanged = false;
+  if (lastBattery == 0) {
+    lastBattery = now;
+  } else if (now - lastBattery >= 10000) {
+    const int previousKind = gState.batteryKind;
+    const int previousPercent = gState.batteryPercent;
+    char previousText[8];
+    strlcpy(previousText, gState.batteryText, sizeof(previousText));
     applyBattery(batteryRead());
     lastBattery = now;
+    batteryChanged = previousKind != gState.batteryKind || previousPercent != gState.batteryPercent ||
+                     strcmp(previousText, gState.batteryText) != 0;
   }
-  if (now - lastDraw >= 1000) {
+  if (fetched || batteryChanged || uiMinuteChanged()) {
     uiPaint(false);
-    lastDraw = now;
   }
-  delay(20);
+  // Running turns need a tighter loop so the 2s poll stays on time.
+  delay((gState.link == LINK_OK && gState.running) ? 40 : 250);
 }
