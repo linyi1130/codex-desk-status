@@ -8,7 +8,8 @@
 // User_Setups/Setup206_LilyGo_T_Display_S3.h:
 //   BL 38, RST 5, CS 6, DC 7, WR 8, RD 9,
 //   D0-D7 = 39, 40, 41, 42, 45, 46, 47, 48,
-//   power enable GPIO15, BOOT GPIO0, user button GPIO14.
+//   power enable GPIO15, BOOT GPIO0, user button GPIO14,
+//   battery ADC GPIO4 (100k/100k divider, multiply by 2).
 // The GRAM offset of 35 is the working LovyanGFX setup for this panel
 // (panel is 170 wide inside a 240-wide ST7789).
 //
@@ -19,6 +20,8 @@
 
 static constexpr int PIN_POWER_ON = 15;
 static constexpr int PIN_BUTTON_USER = 14;
+// LilyGO examples/factory/pin_config.h: PIN_BAT_VOLT. ADC1 channel, safe with Wi-Fi.
+static constexpr int PIN_BAT_VOLT = 4;
 
 class DeskDisplay : public lgfx::LGFX_Device {
  public:

@@ -101,6 +101,13 @@ void applyJson(const String& body) {
   gState.syncMillis = millis();
   gState.everSynced = gState.unixBase > 0;
   gState.hasSession = doc["has_session"] | false;
+  int pageIndex = doc["page_index"] | 1;
+  int pageCount = doc["page_count"] | 1;
+  if (pageIndex < 1) pageIndex = 1;
+  if (pageCount < 1) pageCount = 1;
+  if (pageIndex > pageCount) pageIndex = pageCount;
+  gState.pageIndex = pageIndex;
+  gState.pageCount = pageCount;
   gState.link = LINK_OK;
   uiNoteComplete(previous);
   Serial.printf("状态 %s  周额度 %.0f%%  上下文 %.0f%%\n", gState.label, gState.weekly, gState.context);

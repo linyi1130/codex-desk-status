@@ -172,6 +172,35 @@ void drawBar(Gfx& gfx, int y, float percent) {
   gfx.fillRoundRect(kPad, y, fill, kBarH, radius, barColor(percent));
 }
 
+uint16_t batteryColor() {
+  if (gState.batteryKind != 2) {
+    return kClock;
+  }
+  if (gState.batteryPercent <= 15) {
+    return kRed;
+  }
+  if (gState.batteryPercent <= 40) {
+    return kAmber;
+  }
+  return kGreen;
+}
+
+template <typename Gfx>
+void drawBatteryIcon(Gfx& gfx, int x, int y, uint16_t color) {
+  constexpr int bodyW = 16;
+  constexpr int bodyH = 9;
+  gfx.drawRoundRect(x, y, bodyW, bodyH, 1, color);
+  gfx.fillRect(x + bodyW, y + 2, 2, bodyH - 4, color);
+  if (gState.batteryKind != 2 || gState.batteryPercent <= 0) {
+    return;
+  }
+  int fill = (bodyW - 4) * gState.batteryPercent / 100;
+  if (fill < 1) {
+    fill = 1;
+  }
+  gfx.fillRect(x + 2, y + 2, fill, bodyH - 4, color);
+}
+
 template <typename Gfx>
 void paintTo(Gfx& gfx) {
   gfx.fillRect(0, 0, kWidth, kHeight, kBg);
@@ -192,12 +221,21 @@ void paintTo(Gfx& gfx) {
     accent = kRed;
   }
 
-  gfx.fillCircle(kDotCx, kDotCy, 4, accent);
-  drawTextFit(gfx, FONT_UI, 30, kStatusY, label, accent, kRight - 58, kHeight);
   char clock[8];
   formatClock(clock, sizeof(clock));
   const int clockWidth = textWidth(FONT_UI, clock);
-  drawText(gfx, FONT_UI, kRight - clockWidth, kStatusY, clock, kClock, kWidth, kHeight);
+  const int clockX = kRight - clockWidth;
+  const char* batteryText = gState.batteryText[0] ? gState.batteryText : "--";
+  const int batteryTextWidth = textWidth(FONT_SUB, batteryText);
+  constexpr int kIconW = 18;
+  const int batteryX = clockX - 8 - kIconW - 2 - batteryTextWidth;
+  const uint16_t batColor = batteryColor();
+
+  gfx.fillCircle(kDotCx, kDotCy, 4, accent);
+  drawTextFit(gfx, FONT_UI, 30, kStatusY, label, accent, batteryX - 6, kHeight);
+  drawBatteryIcon(gfx, batteryX, kStatusY + 4, batColor);
+  drawText(gfx, FONT_SUB, batteryX + kIconW + 2, kStatusY + 2, batteryText, batColor, kWidth, kHeight);
+  drawText(gfx, FONT_UI, clockX, kStatusY, clock, kClock, kWidth, kHeight);
 
   const bool showMeters = gState.link == LINK_OK || gState.everSynced;
   const float weekly = showMeters ? gState.weekly : -1;
@@ -221,7 +259,16 @@ void paintTo(Gfx& gfx) {
 
   char footer[96];
   composeFooter(footer, sizeof(footer));
-  drawTextFit(gfx, FONT_UI, kPad, kFootY, footer, kBlue, kRight, kHeight);
+  int footerMax = kRight;
+  if (gState.link == LINK_OK && gState.pageCount > 1) {
+    char badge[8];
+    snprintf(badge, sizeof(badge), "%d/%d", gState.pageIndex, gState.pageCount);
+    const int badgeWidth = textWidth(FONT_SUB, badge);
+    const int badgeX = kRight - badgeWidth;
+    drawText(gfx, FONT_SUB, badgeX, kFootY + 2, badge, kClock, kWidth, kHeight);
+    footerMax = badgeX - 6;
+  }
+  drawTextFit(gfx, FONT_UI, kPad, kFootY, footer, kBlue, footerMax, kHeight);
 }
 
 }  // namespace

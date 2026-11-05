@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 import parse_session
 from parse_session import (
+    STALE_RUNNING_SECONDS,
     HookHint,
     SessionFollower,
     SessionView,
@@ -37,10 +38,8 @@ from parse_session import (
     is_child_session,
     local_tz_offset,
     merge_quota,
-    overlay_child_progress,
     parse_file,
     read_session_head,
-    scope_hook,
 )
 
 
@@ -49,6 +48,13 @@ DEFAULT_PORT = 8787
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_MDNS = "codex-status"
 DONOR_LIMIT = 8
+# Long enough that a 2-second board poll cannot skip a page, short enough
+# that several live windows still rotate.
+PAGE_DWELL_SECONDS = 4.0
+# The chatting window's 已完成 / 已中断 stays up long enough to notice,
+# including the white flash the board plays on running -> complete.
+COMPLETION_HOLD_SECONDS = 8.0
+MAX_FRESH_PARSES = 24
 
 
 def log(message: str) -> None:
@@ -73,12 +79,53 @@ def load_dotenv(path: Path) -> None:
             os.environ.setdefault(key, value)
 
 
+def hook_for_session(hook: HookHint | None, view: SessionView, is_focus: bool) -> HookHint | None:
+    """Apply a hook only to the session it names. Anonymous hooks stay on the focus window."""
+    if hook is None or hook.phase is None:
+        return None
+    if hook.session_id:
+        if view.session_id and hook.session_id == view.session_id:
+            return hook
+        return None
+    return hook if is_focus else None
+
+
+def page_identity(payload: dict) -> str:
+    session_id = payload.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+    session_file = payload.get("session_file")
+    if isinstance(session_file, str) and session_file:
+        return session_file
+    return ""
+
+
+def page_sort_key(payload: dict, focus_id: object) -> tuple[int, str]:
+    identity = page_identity(payload)
+    return (0 if identity and identity == focus_id else 1, identity)
+
+
+def stamp_page(payload: dict, index: int, count: int) -> dict:
+    payload["page_index"] = index
+    payload["page_count"] = count
+    if count > 1:
+        project = payload.get("project_name") or "Codex"
+        elapsed = payload.get("turn_elapsed_text") or ""
+        payload["footer"] = f"{project} · {index}/{count} · 本轮已运行 {elapsed}"
+    return payload
+
+
 class Engine:
     def __init__(self) -> None:
         self.follower = SessionFollower()
         self.cache: dict[str, tuple[int, int, SessionView]] = {}
         # session_meta is the first record and does not change when the file grows.
         self.heads: dict[str, tuple[int, SessionView]] = {}
+        self.focus_status: str | None = None
+        self.hold_until: float | None = None
+        self.hold_session: str | None = None
+        self.rotation_ids: tuple[str, ...] | None = None
+        self.rotation_anchor: float | None = None
 
     def payload(
         self,
@@ -91,28 +138,60 @@ class Engine:
         files = list_session_files(sessions)
         if not files:
             message = "还没有 Codex 会话" if sessions.is_dir() else "找不到 ~/.codex/sessions"
-            return empty_payload(now, tz_offset_seconds, message)
-        active = self.select_main(files)
+            return stamp_page(empty_payload(now, tz_offset_seconds, message), 1, 1)
+        focus_path = self.select_main(files)
         try:
-            view = self.follower.sync(active)
+            focus_view = self.follower.sync(focus_path)
         except OSError as exc:
-            log(f"无法读取 {active.name}: {exc}")
-            return empty_payload(now, tz_offset_seconds, "会话文件暂时读不了")
-        donors, children = self.companions(files, active, view)
-        merged = merge_quota(view, donors)
-        child_views = [child for _, child in children]
-        shown = overlay_child_progress(merged, child_views)
-        payload = build_payload(
-            shown,
+            log(f"无法读取 {focus_path.name}: {exc}")
+            return stamp_page(empty_payload(now, tz_offset_seconds, "会话文件暂时读不了"), 1, 1)
+        fresh = self.fresh_views(files, focus_path, now)
+        pool = self.quota_pool(files, focus_path, focus_view, fresh)
+        focus_payload = self.page_payload(
+            focus_view,
+            focus_path,
+            pool,
             now,
-            tz_offset_seconds=tz_offset_seconds,
-            session_file=active.name,
-            file_mtime=self.display_mtime(active, shown, children),
-            hook=scope_hook(hook, view, child_views),
+            tz_offset_seconds,
+            hook,
+            is_focus=True,
+            file_mtime=self.focus_mtime(focus_path, focus_view, fresh),
         )
-        if payload["source"] == "session" and not payload["has_session"]:
-            payload["has_session"] = True
-        return payload
+        running = []
+        if focus_payload["status"] == "running":
+            running.append(focus_payload)
+        for path, view, mtime in fresh:
+            page = self.page_payload(
+                view,
+                path,
+                pool,
+                now,
+                tz_offset_seconds,
+                hook,
+                is_focus=False,
+                file_mtime=mtime,
+            )
+            if page["status"] == "running":
+                running.append(page)
+        running.sort(key=lambda page: page_sort_key(page, focus_payload.get("session_id")))
+        self.note_focus(now, focus_payload)
+        if self.holding(now, focus_payload):
+            return stamp_page(focus_payload, 1, 1)
+        if not running:
+            self.rotation_ids = None
+            self.rotation_anchor = None
+            return stamp_page(focus_payload, 1, 1)
+        if len(running) == 1:
+            self.rotation_ids = (page_identity(running[0]),)
+            self.rotation_anchor = now
+            return stamp_page(running[0], 1, 1)
+        ids = tuple(page_identity(page) for page in running)
+        if ids != self.rotation_ids or self.rotation_anchor is None:
+            self.rotation_ids = ids
+            self.rotation_anchor = now
+        elapsed = max(0.0, now - self.rotation_anchor)
+        slot = int((elapsed + 1e-6) / PAGE_DWELL_SECONDS) % len(running)
+        return stamp_page(running[slot], slot + 1, len(running))
 
     def select_main(self, files: list[Path]) -> Path:
         """Newest rollout that is the user's chatting window.
@@ -131,70 +210,141 @@ class Engine:
                 log(f"跳过 {path.name}: {exc}")
         return files[0]
 
-    def companions(
+    def fresh_views(
         self,
         files: list[Path],
-        main_path: Path,
-        main_view: SessionView,
-    ) -> tuple[list[SessionView], list[tuple[Path, SessionView]]]:
-        """Quota donors are other chatting windows. Children only hint progress.
-
-        Donors stay capped at ``DONOR_LIMIT`` non-child files, skipping
-        sub-agent rollouts so a burst of child writes cannot crowd out the
-        session that actually has rate-limit numbers.
-        """
-        donors: list[SessionView] = []
-        if main_view.weekly or main_view.five_hour:
-            donors.append(main_view)
-        children: list[tuple[Path, SessionView]] = []
-        main_has_quota = bool(main_view.weekly or main_view.five_hour)
-        roots_seen = 0
+        focus_path: Path,
+        now: float,
+    ) -> list[tuple[Path, SessionView, float]]:
+        """Sessions touched recently enough that they might still be running."""
+        found: list[tuple[Path, SessionView, float]] = []
         for path in files:
-            if path == main_path:
+            if path == focus_path or len(found) >= MAX_FRESH_PARSES:
                 continue
             try:
-                head = self.head(path)
+                mtime = path.stat().st_mtime
             except OSError as exc:
                 log(f"跳过 {path.name}: {exc}")
                 continue
-            if is_child_session(head):
-                if len(children) >= DONOR_LIMIT or not child_belongs_to(head, main_view):
-                    continue
-                try:
-                    children.append((path, self.cached(path)))
-                except OSError as exc:
-                    log(f"跳过 {path.name}: {exc}")
-                continue
-            roots_seen += 1
-            if not main_has_quota and len(donors) < DONOR_LIMIT:
-                try:
-                    donors.append(self.cached(path))
-                except OSError as exc:
-                    log(f"跳过 {path.name}: {exc}")
-            if roots_seen >= DONOR_LIMIT and (main_has_quota or len(donors) >= DONOR_LIMIT):
+            if now - mtime > STALE_RUNNING_SECONDS:
                 break
-        return donors, children
+            try:
+                found.append((path, self.cached(path), mtime))
+            except OSError as exc:
+                log(f"跳过 {path.name}: {exc}")
+        return found
 
-    def display_mtime(
+    def quota_pool(
         self,
-        main_path: Path,
-        shown: SessionView,
-        children: list[tuple[Path, SessionView]],
-    ) -> float | None:
-        try:
-            mtime = main_path.stat().st_mtime
-        except OSError:
-            return None
-        if shown.phase != "running":
-            return mtime
-        for path, child in children:
-            if child.phase != "running":
+        files: list[Path],
+        focus_path: Path,
+        focus_view: SessionView,
+        fresh: list[tuple[Path, SessionView, float]],
+    ) -> list[SessionView]:
+        """Account quota from chatting windows, never from a sub-agent file."""
+        pool: list[SessionView] = []
+        seen: set[str] = set()
+
+        def add(view: SessionView) -> None:
+            if is_child_session(view) or not (view.weekly or view.five_hour):
+                return
+            key = view.session_id or str(id(view))
+            if key in seen:
+                return
+            seen.add(key)
+            pool.append(view)
+
+        add(focus_view)
+        for _, view, _ in fresh:
+            add(view)
+            if len(pool) >= DONOR_LIMIT:
+                return pool
+        if focus_view.weekly or focus_view.five_hour:
+            return pool
+        roots = 0
+        for path in files:
+            if len(pool) >= DONOR_LIMIT or roots >= DONOR_LIMIT:
+                break
+            if path == focus_path:
                 continue
             try:
-                mtime = max(mtime, path.stat().st_mtime)
-            except OSError:
+                if is_child_session(self.head(path)):
+                    continue
+            except OSError as exc:
+                log(f"跳过 {path.name}: {exc}")
                 continue
+            roots += 1
+            try:
+                add(self.cached(path))
+            except OSError as exc:
+                log(f"跳过 {path.name}: {exc}")
+        return pool
+
+    def focus_mtime(
+        self,
+        path: Path,
+        view: SessionView,
+        fresh: list[tuple[Path, SessionView, float]],
+    ) -> float | None:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return None
+        if view.phase != "running":
+            return mtime
+        for _, child, child_mtime in fresh:
+            if child.phase == "running" and child_belongs_to(child, view):
+                mtime = max(mtime, child_mtime)
         return mtime
+
+    def page_payload(
+        self,
+        view: SessionView,
+        path: Path,
+        pool: list[SessionView],
+        now: float,
+        tz_offset_seconds: int | None,
+        hook: HookHint | None,
+        is_focus: bool,
+        file_mtime: float | None,
+    ) -> dict:
+        shown = view if (view.weekly or view.five_hour) else merge_quota(view, pool)
+        payload = build_payload(
+            shown,
+            now,
+            tz_offset_seconds=tz_offset_seconds,
+            session_file=path.name,
+            file_mtime=file_mtime,
+            hook=hook_for_session(hook, view, is_focus),
+        )
+        if payload["source"] == "session" and not payload["has_session"]:
+            payload["has_session"] = True
+        return payload
+
+    def note_focus(self, now: float, focus_payload: dict) -> None:
+        status = str(focus_payload.get("status") or "")
+        session_id = focus_payload.get("session_id")
+        if (
+            self.focus_status == "running"
+            and status in {"complete", "interrupted"}
+            and isinstance(session_id, str)
+            and session_id
+        ):
+            self.hold_until = now + COMPLETION_HOLD_SECONDS
+            self.hold_session = session_id
+        if status == "running":
+            self.hold_until = None
+            self.hold_session = None
+        self.focus_status = status
+
+    def holding(self, now: float, focus_payload: dict) -> bool:
+        if self.hold_until is None or now >= self.hold_until:
+            if self.hold_until is not None and now >= self.hold_until:
+                self.hold_until = None
+                self.rotation_anchor = now
+                self.rotation_ids = None
+            return False
+        return focus_payload.get("session_id") == self.hold_session
 
     def head(self, path: Path) -> SessionView:
         stat = path.stat()
@@ -319,6 +469,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .status { font-weight: 650; }
   .orange { color: #f5a524; } .green { color: #3ddc6a; } .red { color: #ff5d5d; } .gray { color: #9aa3b5; }
   .clock { color: #9aa3b5; }
+  .page { color: #9aa3b5; margin-right: 8px; }
   .label { color: #e6eaf2; margin-top: 8px; }
   .pct { color: white; font-weight: 700; }
   .track { height: 12px; background: #2c3548; border-radius: 999px; margin-top: 4px; overflow: hidden; }
@@ -351,10 +502,11 @@ function render(data) {
   const plan = data.plan_name ? " · " + data.plan_name : "";
   const reset = (data.weekly_reset_text || "暂无数据") + plan;
   const ctx = data.context_text || "暂无数据";
+  const page = (data.page_count > 1) ? `<span class="page">${data.page_index}/${data.page_count}</span>` : "";
   const w = weekly == null ? 0 : Math.max(0, Math.min(100, weekly));
   const c = context == null ? 0 : Math.max(0, Math.min(100, context));
   document.getElementById("screen").innerHTML = `
-    <div class="row"><div class="status ${esc(data.color)}">● ${esc(data.label)}</div><div class="clock">${esc(data.clock)}</div></div>
+    <div class="row"><div class="status ${esc(data.color)}">● ${esc(data.label)}</div><div class="clock">${page}${esc(data.clock)}</div></div>
     <div class="row label"><div>本周额度</div><div class="pct">${weekly == null ? "--" : Math.round(weekly) + "%"}</div></div>
     <div class="track"><div class="fill" style="width:${w}%;background:${barColor(weekly)}"></div></div>
     <div class="sub">${esc(reset)}</div>

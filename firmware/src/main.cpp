@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "battery.h"
 #include "board.h"
 #include "net.h"
 #include "ui.h"
@@ -53,6 +54,20 @@ uint8_t demoIndex = 0;
 uint32_t demoStamp = 0;
 bool buttonDown = false;
 
+void applyBattery(const BatteryState& reading) {
+  gState.batteryKind = reading.kind;
+  gState.batteryPercent = reading.percent;
+  if (reading.kind == BAT_USB) {
+    strlcpy(gState.batteryText, "USB", sizeof(gState.batteryText));
+  } else if (reading.kind == BAT_LEVEL && reading.percent >= 0) {
+    snprintf(gState.batteryText, sizeof(gState.batteryText), "%d%%", reading.percent);
+  } else {
+    gState.batteryKind = BAT_NONE;
+    gState.batteryPercent = -1;
+    strlcpy(gState.batteryText, "无电", sizeof(gState.batteryText));
+  }
+}
+
 void showDemo(uint8_t index) {
   const DemoFrame& frame = kFrames[index];
   char previous[16];
@@ -74,6 +89,17 @@ void showDemo(uint8_t index) {
   gState.syncMillis = millis();
   gState.everSynced = frame.link != LINK_WIFI;
   gState.turnStartedAt = frame.running ? gState.unixBase - frame.elapsed : 0;
+  gState.pageIndex = (index == 0) ? 2 : 1;
+  gState.pageCount = (index == 0) ? 4 : 1;
+  if (frame.link == LINK_WIFI) {
+    applyBattery(batteryMake(BAT_USB, -1, 5000));
+  } else if (frame.link == LINK_STALE) {
+    applyBattery(batteryMake(BAT_NONE, -1, 0));
+  } else if (index == 4) {
+    applyBattery(batteryMake(BAT_LEVEL, 12, 3480));
+  } else {
+    applyBattery(batteryMake(BAT_LEVEL, 76, 3950));
+  }
   uiNoteComplete(previous);
   uiPaint(false);
   demoStamp = millis();
@@ -92,6 +118,10 @@ void setup() {
   Serial.begin(115200);
   delay(50);
   pinMode(PIN_BUTTON_USER, INPUT_PULLUP);
+  batteryBegin();
+  if (!DEMO_MODE) {
+    applyBattery(batteryRead());
+  }
   uiBegin();
   Serial.printf("屏幕 %d x %d\n", 320, 170);
   if (DEMO_MODE) {
@@ -114,9 +144,15 @@ void loop() {
   }
   netLoop(pressed);
   static uint32_t lastDraw = 0;
-  if (millis() - lastDraw >= 1000) {
+  static uint32_t lastBattery = 0;
+  const uint32_t now = millis();
+  if (now - lastBattery >= 2000) {
+    applyBattery(batteryRead());
+    lastBattery = now;
+  }
+  if (now - lastDraw >= 1000) {
     uiPaint(false);
-    lastDraw = millis();
+    lastDraw = now;
   }
   delay(20);
 }

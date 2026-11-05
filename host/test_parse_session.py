@@ -12,7 +12,14 @@ from pathlib import Path
 
 import codex_status
 import parse_session
-from codex_status import Engine, Handler, Service, client_is_local
+from codex_status import (
+    COMPLETION_HOLD_SECONDS,
+    PAGE_DWELL_SECONDS,
+    Engine,
+    Handler,
+    Service,
+    client_is_local,
+)
 from parse_session import HookHint, SessionFollower, hint_from_hook, parse_jsonl
 
 
@@ -493,13 +500,19 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(first["context_limit_tokens"], 475000)
             self.assertEqual(first["weekly_used_percent"], 22)
             self.assertEqual(first["status"], "running")
-            self.assertEqual(first["label"], "执行中 · 跑命令")
-            self.assertEqual(first["detail"], "跑命令")
+            self.assertEqual(first["label"], "执行中 · 思考中")
+            self.assertEqual(first["page_index"], 1)
+            self.assertEqual(first["page_count"], 4)
             self.assertEqual(first["project_name"], "NiceShot")
-            self.assertEqual(first["turn_elapsed_seconds"], 252)
+            self.assertIn("1/4", first["footer"])
             blob = json.dumps(first, ensure_ascii=False)
             self.assertNotIn("sk-child-secret", blob)
             self.assertNotIn("do-not-leak-prompt", blob)
+
+            same = engine.payload(home, NOW + 1, TZ, None)
+            self.assertEqual(same["session_id"], "main-chat")
+            self.assertEqual(same["context_used_tokens"], 218000)
+            self.assertEqual(same["page_index"], 1)
 
             edit_path = day / "rollout-edit.jsonl"
             with edit_path.open("a", encoding="utf-8") as handle:
@@ -513,69 +526,217 @@ class MainWindowSelectionTest(unittest.TestCase):
                 )
             os.utime(edit_path, (NOW + 5, NOW + 5))
             os.utime(day / "rollout-foreign.jsonl", (NOW + 6, NOW + 6))
-            second = engine.payload(home, NOW, TZ, None)
-            self.assertEqual(second["session_file"], "rollout-main.jsonl")
-            self.assertEqual(second["session_id"], "main-chat")
-            self.assertEqual(second["context_used_tokens"], 218000)
-            self.assertEqual(second["context_used_percent"], first["context_used_percent"])
-            self.assertEqual(second["weekly_used_percent"], 22)
-            self.assertEqual(second["label"], "执行中 · 编辑文件")
-            self.assertNotIn("secret patch body", json.dumps(second, ensure_ascii=False))
+            child_page = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(child_page["session_file"], "rollout-edit.jsonl")
+            self.assertEqual(child_page["session_id"], "child-edit")
+            self.assertEqual(child_page["context_used_tokens"], 410000)
+            self.assertEqual(child_page["label"], "执行中 · 编辑文件")
+            self.assertEqual(child_page["page_index"], 2)
+            self.assertEqual(child_page["page_count"], 4)
+            self.assertNotIn("secret patch body", json.dumps(child_page, ensure_ascii=False))
 
-    def test_main_completion_and_interruption_stay_on_the_chatting_window(self) -> None:
+            sibling = engine.payload(home, NOW + 2 * PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(sibling["session_id"], "child-shell")
+            self.assertEqual(sibling["context_used_tokens"], 300000)
+            self.assertNotEqual(sibling["context_used_tokens"], 218000)
+
+            back = engine.payload(home, NOW + 4 * PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(back["session_file"], "rollout-main.jsonl")
+            self.assertEqual(back["context_used_tokens"], 218000)
+            self.assertEqual(back["weekly_used_percent"], 22)
+            self.assertEqual(back["page_index"], 1)
+
+    def _running_pair(self, root: Path) -> Path:
+        day = root / ".codex" / "sessions" / "2026" / "11" / "05"
+        day.mkdir(parents=True)
+        _write(
+            day,
+            "rollout-main.jsonl",
+            "\n".join(
+                [
+                    _line("session_meta", {"id": "main-chat", "cwd": "/Users/me/Developer/NiceShot", "source": "cli"}),
+                    _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                    _tokens(218000, "2026-11-05T00:26:00Z", weekly=22),
+                ]
+            ),
+            NOW - 5,
+        )
+        _write(
+            day,
+            "rollout-child.jsonl",
+            "\n".join(
+                [
+                    _line(
+                        "session_meta",
+                        {"id": "child", "parent_thread_id": "main-chat", "thread_source": "subagent"},
+                    ),
+                    _line("event_msg", {"type": "task_started"}, "2026-11-05T00:27:00Z"),
+                    _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:27:05Z"),
+                    _tokens(410000, "2026-11-05T00:27:06Z", weekly=86),
+                ]
+            ),
+            NOW,
+        )
+        return day
+
+    def test_main_completion_and_interruption_hold_then_rotation_resumes(self) -> None:
         import tempfile
 
-        def scenario(ending: str) -> dict:
+        def finish(ending: str, label: str, status: str, color: str) -> None:
             with tempfile.TemporaryDirectory() as tmp:
-                day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
-                day.mkdir(parents=True)
-                _write(
-                    day,
-                    "rollout-main.jsonl",
-                    "\n".join(
-                        [
-                            _line("session_meta", {"id": "main-chat", "cwd": "/Users/me/Developer/NiceShot", "source": "cli"}),
-                            _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
-                            _tokens(218000, "2026-11-05T00:26:00Z", weekly=22),
-                            _line("event_msg", {"type": ending, "duration_ms": 180000}, "2026-11-05T00:26:40Z"),
-                        ]
-                    ),
-                    NOW - 5,
-                )
-                _write(
-                    day,
-                    "rollout-child.jsonl",
-                    "\n".join(
-                        [
-                            _line(
-                                "session_meta",
-                                {"id": "child", "parent_thread_id": "main-chat", "thread_source": "subagent"},
-                            ),
-                            _line("event_msg", {"type": "task_started"}, "2026-11-05T00:27:00Z"),
-                            _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:27:05Z"),
-                            _tokens(410000, "2026-11-05T00:27:06Z", weekly=86),
-                        ]
-                    ),
-                    NOW,
-                )
-                return Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+                root = Path(tmp)
+                day = self._running_pair(root)
+                home = root / ".codex"
+                engine = Engine()
+                started = engine.payload(home, NOW, TZ, None)
+                self.assertEqual(started["status"], "running")
+                self.assertEqual(started["session_id"], "main-chat")
+                self.assertEqual(started["page_count"], 2)
+                main_path = day / "rollout-main.jsonl"
+                with main_path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        _line("event_msg", {"type": ending, "duration_ms": 180000}, "2026-11-05T00:26:40Z") + "\n"
+                    )
+                os.utime(main_path, (NOW + 1, NOW + 1))
+                held = engine.payload(home, NOW + 1, TZ, None)
+                self.assertEqual(held["session_file"], "rollout-main.jsonl")
+                self.assertEqual(held["status"], status)
+                self.assertEqual(held["label"], label)
+                self.assertEqual(held["color"], color)
+                self.assertEqual(held["context_used_tokens"], 218000)
+                self.assertEqual(held["weekly_used_percent"], 22)
+                self.assertEqual(held["page_count"], 1)
+                if status == "complete":
+                    self.assertEqual(held["turn_elapsed_text"], "3分0秒")
+                still = engine.payload(home, NOW + 1 + COMPLETION_HOLD_SECONDS - 1, TZ, None)
+                self.assertEqual(still["label"], label)
+                self.assertEqual(still["context_used_tokens"], 218000)
+                resumed = engine.payload(home, NOW + 1 + COMPLETION_HOLD_SECONDS, TZ, None)
+                self.assertEqual(resumed["session_id"], "child")
+                self.assertEqual(resumed["status"], "running")
+                self.assertEqual(resumed["context_used_tokens"], 410000)
+                self.assertEqual(resumed["page_count"], 1)
 
-        done = scenario("task_complete")
-        self.assertEqual(done["session_file"], "rollout-main.jsonl")
-        self.assertEqual(done["status"], "complete")
-        self.assertEqual(done["label"], "已完成")
-        self.assertEqual(done["color"], "green")
-        self.assertEqual(done["context_used_tokens"], 218000)
-        self.assertEqual(done["weekly_used_percent"], 22)
-        self.assertEqual(done["turn_elapsed_text"], "3分0秒")
+        finish("task_complete", "已完成", "complete", "green")
+        finish("turn_aborted", "已中断", "interrupted", "red")
 
-        stopped = scenario("turn_aborted")
-        self.assertEqual(stopped["session_file"], "rollout-main.jsonl")
-        self.assertEqual(stopped["status"], "interrupted")
-        self.assertEqual(stopped["label"], "已中断")
-        self.assertEqual(stopped["color"], "red")
-        self.assertEqual(stopped["context_used_tokens"], 218000)
-        self.assertNotEqual(stopped["context_used_tokens"], 410000)
+    def test_child_completion_does_not_steal_the_reminder(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            day = self._running_pair(root)
+            home = root / ".codex"
+            engine = Engine()
+            self.assertEqual(engine.payload(home, NOW, TZ, None)["session_id"], "main-chat")
+            child_path = day / "rollout-child.jsonl"
+            with child_path.open("a", encoding="utf-8") as handle:
+                handle.write(_line("event_msg", {"type": "task_complete", "duration_ms": 1000}, "2026-11-05T00:27:10Z") + "\n")
+            os.utime(child_path, (NOW + 1, NOW + 1))
+            page = engine.payload(home, NOW + 1, TZ, None)
+            self.assertEqual(page["session_id"], "main-chat")
+            self.assertEqual(page["status"], "running")
+            self.assertEqual(page["label"], "执行中 · 思考中")
+            self.assertEqual(page["context_used_tokens"], 218000)
+            self.assertEqual(page["page_count"], 1)
+
+    def test_lone_running_window_does_not_flip(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "only", "cwd": "/work/App", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                        _tokens(218000, "2026-11-05T00:24:00Z", weekly=22),
+                    ]
+                ),
+                NOW,
+            )
+            _write(
+                day,
+                "rollout-idle.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "old", "cwd": "/work/Old"}),
+                        _line("event_msg", {"type": "task_complete"}, "2026-11-05T00:10:00Z"),
+                        _tokens(111000, "2026-11-05T00:10:01Z", weekly=5),
+                    ]
+                ),
+                NOW - 100,
+            )
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            first = engine.payload(home, NOW, TZ, None)
+            later = engine.payload(home, NOW + 30, TZ, None)
+            self.assertEqual(first["session_id"], "only")
+            self.assertEqual(later["session_id"], "only")
+            self.assertEqual(first["page_count"], 1)
+            self.assertEqual(later["page_count"], 1)
+            self.assertEqual(later["page_index"], 1)
+            self.assertEqual(later["context_used_tokens"], 218000)
+            self.assertNotIn("1/1", later["footer"])
+
+    def test_idle_or_stale_session_does_not_take_a_page(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-finished.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "finished", "cwd": "/work/Done", "source": "cli"}),
+                        _line("event_msg", {"type": "task_complete"}, "2026-11-05T00:20:00Z"),
+                        _tokens(12000, "2026-11-05T00:20:01Z", weekly=12),
+                    ]
+                ),
+                NOW,
+            )
+            _write(
+                day,
+                "rollout-live.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "live", "cwd": "/work/Live", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:00Z"),
+                        _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:26:10Z"),
+                        _tokens(218000, "2026-11-05T00:26:20Z", weekly=22),
+                    ]
+                ),
+                NOW - 40,
+            )
+            _write(
+                day,
+                "rollout-stale.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "stale", "cwd": "/work/Old", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:00:00Z"),
+                        _tokens(410000, "2026-11-05T00:00:01Z", weekly=90),
+                    ]
+                ),
+                NOW - 31 * 60,
+            )
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            page = engine.payload(home, NOW, TZ, None)
+            later = engine.payload(home, NOW + 20, TZ, None)
+            self.assertEqual(page["session_id"], "live")
+            self.assertEqual(page["status"], "running")
+            self.assertEqual(page["label"], "执行中 · 跑命令")
+            self.assertEqual(page["context_used_tokens"], 218000)
+            self.assertEqual(page["page_count"], 1)
+            self.assertEqual(later["session_id"], "live")
+            self.assertEqual(later["page_count"], 1)
+            self.assertNotEqual(page["context_used_tokens"], 410000)
 
     def test_nested_source_and_thread_source_cannot_become_the_window(self) -> None:
         import tempfile
@@ -636,12 +797,20 @@ class MainWindowSelectionTest(unittest.TestCase):
                 ),
                 NOW,
             )
-            payload = Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            payload = engine.payload(home, NOW, TZ, None)
             self.assertEqual(payload["session_file"], "rollout-main.jsonl")
             self.assertEqual(payload["session_id"], "main-chat")
             self.assertEqual(payload["context_used_tokens"], 218000)
-            self.assertEqual(payload["label"], "执行中 · 编辑文件")
+            self.assertEqual(payload["label"], "执行中 · 思考中")
             self.assertEqual(payload["status"], "running")
+            self.assertEqual(payload["page_count"], 2)
+            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(child["session_id"], "nested")
+            self.assertEqual(child["label"], "执行中 · 编辑文件")
+            self.assertEqual(child["context_used_tokens"], 410000)
+            self.assertEqual(child["page_index"], 2)
 
     def test_child_keeps_a_quiet_main_turn_from_looking_idle(self) -> None:
         import tempfile
@@ -673,12 +842,19 @@ class MainWindowSelectionTest(unittest.TestCase):
                 ),
                 NOW,
             )
-            payload = Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            payload = engine.payload(home, NOW, TZ, None)
             self.assertFalse(payload["stale"])
             self.assertEqual(payload["status"], "running")
-            self.assertEqual(payload["label"], "执行中 · 跑命令")
+            self.assertEqual(payload["label"], "执行中 · 思考中")
             self.assertEqual(payload["context_used_tokens"], 218000)
             self.assertEqual(payload["session_file"], "rollout-main.jsonl")
+            self.assertEqual(payload["page_count"], 2)
+            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(child["session_id"], "child")
+            self.assertEqual(child["label"], "执行中 · 跑命令")
+            self.assertEqual(child["context_used_tokens"], 410000)
 
     def test_quota_donor_still_works_and_child_quota_does_not_replace_it(self) -> None:
         import tempfile
@@ -759,14 +935,24 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(held["context_used_tokens"], 218000)
             self.assertEqual(held["session_file"], "rollout-main.jsonl")
 
-            child_tool = HookHint(NOW, "running", "编辑文件", None, "child")
-            hinted = engine.payload(home, NOW, TZ, child_tool)
+            child_tool = HookHint(NOW + 1, "running", "编辑文件", None, "child")
+            opened = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, child_tool)
+            self.assertEqual(opened["session_id"], "main-chat")
+            self.assertEqual(opened["label"], "执行中 · 思考中")
+            self.assertEqual(opened["context_used_tokens"], 218000)
+            hinted = engine.payload(home, NOW + 2 * PAGE_DWELL_SECONDS, TZ, child_tool)
+            self.assertEqual(hinted["session_id"], "child")
             self.assertEqual(hinted["label"], "执行中 · 编辑文件")
-            self.assertEqual(hinted["context_used_tokens"], 218000)
+            self.assertIsNone(hinted["context_used_tokens"])
             self.assertTrue(hinted["hook_fresh"])
+            parent = engine.payload(home, NOW + 3 * PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(parent["session_id"], "main-chat")
+            self.assertEqual(parent["label"], "执行中 · 思考中")
+            self.assertEqual(parent["context_used_tokens"], 218000)
 
-            main_done = HookHint(NOW, "complete", "", None, "main-chat")
-            finished = engine.payload(home, NOW, TZ, main_done)
+            done_at = NOW + 3 * PAGE_DWELL_SECONDS + 1
+            main_done = HookHint(done_at, "complete", "", None, "main-chat")
+            finished = engine.payload(home, done_at, TZ, main_done)
             self.assertEqual(finished["status"], "complete")
             self.assertEqual(finished["label"], "已完成")
             self.assertEqual(finished["color"], "green")

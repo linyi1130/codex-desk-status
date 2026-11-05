@@ -28,6 +28,12 @@ struct DeskState {
   uint32_t syncMillis = 0;
   bool everSynced = false;
   bool hasSession = false;
+  // 0 = no cell, 1 = USB/charger voltage, 2 = a real pack percentage.
+  int batteryKind = 0;
+  int batteryPercent = -1;
+  char batteryText[8] = "";
+  int pageIndex = 1;
+  int pageCount = 1;
 };
 
 extern DeskState gState;
