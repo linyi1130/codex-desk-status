@@ -97,19 +97,23 @@ bool consumeSleepPress() {
 }
 
 void armEitherButtonWake() {
-  const gpio_num_t pins[] = {GPIO_NUM_0, GPIO_NUM_14};
-  for (gpio_num_t pin : pins) {
-    rtc_gpio_pullup_en(pin);
-    rtc_gpio_pulldown_dis(pin);
-  }
-  const uint64_t mask = (1ULL << GPIO_NUM_0) | (1ULL << GPIO_NUM_14);
-  // ESP32-S3 ext1: ANY_LOW wakes if either RTC pin goes low. ext0 can watch only one pin.
+  // Wake on the USER button (GPIO14) only. GPIO0 is the BOOT strap pin: holding
+  // it LOW at wake reset sends the ROM into download mode, which looks like an
+  // intermittent "no response". GPIO0 stays a sleep-only button; GPIO14 doubles
+  // as the wake key. Its pullup is set in setup() via INPUT_PULLUP and, GPIO14
+  // being an RTC pin, that pullup persists through deep sleep.
+  rtc_gpio_pullup_en(GPIO_NUM_14);
+  rtc_gpio_pulldown_dis(GPIO_NUM_14);
+  const uint64_t mask = 1ULL << GPIO_NUM_14;
+  // ESP32-S3 ext1: ANY_LOW wakes if a watched RTC pin goes low.
   esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
 }
 
 void enterDeepSleep() {
   Serial.println("deep sleep");
-  Serial.flush();
+  // NOTE: no Serial.flush() here. With native USB-CDC and no host reading the
+  // port, flush() blocks waiting for the TX buffer to drain, which stalls the
+  // sleep path before uiShutdown() and makes the key look dead.
   uiShutdown();
   if (!DEMO_MODE) {
     WiFi.disconnect(true);
