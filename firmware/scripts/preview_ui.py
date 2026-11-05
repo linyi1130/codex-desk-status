@@ -13,10 +13,10 @@ import gen_font
 
 W, H = 320, 170
 PAD, RIGHT = 14, 306
-STATUS_Y, DOT = 4, (20, 12)
-LABEL1_Y, BAR1_Y, BAR_H, SUB1_Y = 24, 42, 6, 54
-LABEL2_Y, BAR2_Y, SUB2_Y = 70, 88, 100
-SUMMARY_Y = 116
+STATUS_Y, DOT = 2, (20, 14)
+LABEL1_Y, BAR1_Y, BAR_H, SUB1_Y = 24, 48, 4, 56
+LABEL2_Y, BAR2_Y, SUB2_Y = 74, 98, 106
+SUMMARY_Y = 124
 FOOT_Y = 150
 
 BG = (11, 18, 32)
@@ -157,10 +157,10 @@ def render(face_ui, face_sub, face_num, state):
     pct = "--" if state["weekly"] < 0 else f"{int(state['weekly'] + 0.5)}%"
     num_y = LABEL1_Y + (face_ui.line_height - face_num.line_height) // 2
     draw_text(image, face_num, RIGHT - face_num.width(pct), num_y, pct, WHITE, W)
-    rounded(draw, (PAD, BAR1_Y, RIGHT, BAR1_Y + BAR_H), BAR_H // 2, TRACK)
+    rounded(draw, (PAD, BAR1_Y, RIGHT, BAR1_Y + BAR_H - 1), BAR_H // 2, TRACK)
     if state["weekly"] > 0:
         fill = int((RIGHT - PAD) * min(state["weekly"], 100) / 100 + 0.5)
-        rounded(draw, (PAD, BAR1_Y, PAD + max(fill, 2), BAR1_Y + BAR_H), BAR_H // 2, bar_color(state["weekly"]))
+        rounded(draw, (PAD, BAR1_Y, PAD + max(fill, 2), BAR1_Y + BAR_H - 1), BAR_H // 2, bar_color(state["weekly"]))
     draw_text(image, face_sub, PAD, SUB1_Y, state["weekly_sub"], DIM, RIGHT)
     draw_text(image, face_ui, PAD, LABEL2_Y, "上下文", TEXT, W)
     pct = "--" if state["context"] < 0 else f"{int(state['context'] + 0.5)}%"
@@ -170,10 +170,10 @@ def render(face_ui, face_sub, face_num, state):
         name_x = PAD + face_ui.width("上下文") + 6
         draw_text(image, face_sub, name_x, LABEL2_Y + 3, window_name, DIM, pct_x - 6)
     draw_text(image, face_num, RIGHT - face_num.width(pct), LABEL2_Y + (face_ui.line_height - face_num.line_height) // 2, pct, WHITE, W)
-    rounded(draw, (PAD, BAR2_Y, RIGHT, BAR2_Y + BAR_H), BAR_H // 2, TRACK)
+    rounded(draw, (PAD, BAR2_Y, RIGHT, BAR2_Y + BAR_H - 1), BAR_H // 2, TRACK)
     if state["context"] > 0:
         fill = int((RIGHT - PAD) * min(state["context"], 100) / 100 + 0.5)
-        rounded(draw, (PAD, BAR2_Y, PAD + max(fill, 2), BAR2_Y + BAR_H), BAR_H // 2, bar_color(state["context"]))
+        rounded(draw, (PAD, BAR2_Y, PAD + max(fill, 2), BAR2_Y + BAR_H - 1), BAR_H // 2, bar_color(state["context"]))
     draw_text(image, face_sub, PAD, SUB2_Y, state["context_sub"], DIM, RIGHT)
     summary = state.get("summary") or ""
     if summary and state["link"] == "ok":

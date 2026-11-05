@@ -19,17 +19,19 @@ constexpr int kWidth = 320;
 constexpr int kHeight = 170;
 constexpr int kPad = 14;
 constexpr int kRight = 306;
-constexpr int kStatusY = 4;
+// FONT_UI ink reaches 20px below the draw origin and FONT_SUB reaches 16px.
+// Bars start 24px under the label origin so they clear that ink and the window title.
+constexpr int kStatusY = 2;
 constexpr int kDotCx = 20;
-constexpr int kDotCy = 12;
+constexpr int kDotCy = 14;
 constexpr int kLabel1Y = 24;
-constexpr int kBar1Y = 42;
-constexpr int kBarH = 6;
-constexpr int kSub1Y = 54;
-constexpr int kLabel2Y = 70;
-constexpr int kBar2Y = 88;
-constexpr int kSub2Y = 100;
-constexpr int kSummaryY = 116;
+constexpr int kBar1Y = 48;
+constexpr int kBarH = 4;
+constexpr int kSub1Y = 56;
+constexpr int kLabel2Y = 74;
+constexpr int kBar2Y = 98;
+constexpr int kSub2Y = 106;
+constexpr int kSummaryY = 124;
 constexpr int kSummaryStep = 14;
 constexpr int kFootY = 150;
 
