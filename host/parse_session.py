@@ -87,10 +87,26 @@ class Window:
     resets_at: float | None
 
 
+# Sub-agent rollouts are not the window the user is looking at.
+# `forked_from_id` is a copied history, not a child, so it is intentionally absent.
+_CHILD_THREAD_SOURCES = {"subagent", "guardian_review", "memory_consolidation"}
+# The parent's own live action wins. These are the labels a spawn leaves behind
+# while the real shell/edit work is only in the child rollout.
+_GENERIC_ACTIVITY = {"", "思考中", "回复中"}
+
+
 @dataclass
 class SessionView:
     session_id: str | None = None
     parent_thread_id: str | None = None
+    # Root thread id (`session_meta.session_id`). Equal to `session_id` on the
+    # chatting window; on a child it names the root of that agent tree.
+    root_session_id: str | None = None
+    thread_source: str | None = None
+    # True when source/thread_source mark a sub-agent even if the parent id
+    # was not copied onto the top-level field. Also set when the first line
+    # of a rollout could not be parsed, so that file cannot steal the display.
+    child_rollout: bool = False
     cwd: str | None = None
     project_name: str | None = None
     client: str | None = None
@@ -216,17 +232,166 @@ def apply_line(view: SessionView, line: str) -> None:
         apply_token_count(view, payload or record, timestamp)
 
 
+def _text(value: object) -> str | None:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned and cleaned.lower() not in {"null", "none"}:
+            return cleaned
+    return None
+
+
+def parent_from_source(source: object) -> str | None:
+    """Parent thread id stored under ``source.subagent.thread_spawn``.
+
+    Older Codex builds put lineage only there. ``forked_from_id`` is not a
+    parent: a forked chat is still a window the user can be looking at.
+    """
+    if not isinstance(source, dict):
+        return None
+    sub = source.get("subagent")
+    if sub is None:
+        sub = source.get("sub_agent")
+    if not isinstance(sub, dict):
+        return None
+    spawn = sub.get("thread_spawn")
+    if spawn is None:
+        spawn = sub.get("threadSpawn")
+    if not isinstance(spawn, dict):
+        return None
+    return _text(spawn.get("parent_thread_id")) or _text(spawn.get("parentThreadId"))
+
+
+def source_marks_child(source: object) -> bool:
+    if isinstance(source, dict):
+        return any(key in source for key in ("subagent", "sub_agent", "internal"))
+    if isinstance(source, str):
+        lowered = source.strip().lower()
+        return lowered.startswith("subagent_") or lowered.startswith("internal_")
+    return False
+
+
 def apply_session_meta(view: SessionView, payload: dict) -> None:
-    session_id = payload.get("id") or payload.get("session_id") or payload.get("sessionId")
-    if isinstance(session_id, str) and session_id.strip():
-        view.session_id = session_id.strip()
-    parent = payload.get("parent_thread_id") or payload.get("parentThreadId")
-    if isinstance(parent, str) and parent.strip():
-        view.parent_thread_id = parent.strip()
-    client = payload.get("source") or payload.get("originator")
-    if isinstance(client, str) and client.strip():
-        view.client = client.strip()
+    thread_id = _text(payload.get("id"))
+    root_id = _text(payload.get("session_id")) or _text(payload.get("sessionId"))
+    if thread_id:
+        view.session_id = thread_id
+    elif root_id:
+        view.session_id = root_id
+    view.root_session_id = root_id or view.session_id
+    source = payload.get("source")
+    parent = _text(payload.get("parent_thread_id")) or _text(payload.get("parentThreadId"))
+    if not parent:
+        parent = parent_from_source(source)
+    # A child thread's `session_id` is the root chat. The root's own file
+    # has `session_id == id` (or no separate session_id at all).
+    if not parent and thread_id and root_id and thread_id != root_id:
+        parent = root_id
+    if parent:
+        view.parent_thread_id = parent
+    thread_source = _text(payload.get("thread_source")) or _text(payload.get("threadSource"))
+    if thread_source:
+        view.thread_source = thread_source
+        if thread_source.lower() in _CHILD_THREAD_SOURCES:
+            view.child_rollout = True
+    if source_marks_child(source):
+        view.child_rollout = True
+    if isinstance(source, str) and source.strip():
+        view.client = source.strip()
+    else:
+        originator = _text(payload.get("originator"))
+        if originator:
+            view.client = originator
     apply_cwd(view, payload.get("cwd") or payload.get("workspace"))
+
+
+def is_child_session(view: SessionView) -> bool:
+    """True for sub-agent / guardian / internal rollouts, not the chatting window.
+
+    ``inter_agent_communication_metadata`` is not a signal. Both the parent
+    and the child record those deliveries, so a main chat that receives a
+    sub-agent reply would be misread as a child.
+    """
+    if view.parent_thread_id:
+        return True
+    return view.child_rollout
+
+
+def child_belongs_to(child: SessionView, main: SessionView) -> bool:
+    """Whether ``child`` was spawned under the chatting window ``main``."""
+    main_id = main.session_id
+    if not main_id or not is_child_session(child):
+        return False
+    if child.session_id == main_id:
+        return False
+    if child.parent_thread_id == main_id:
+        return True
+    if child.root_session_id == main_id:
+        return True
+    return False
+
+
+def overlay_child_progress(main: SessionView, children: list[SessionView]) -> SessionView:
+    """Show a sub-agent's current action without taking its context or quota.
+
+    The chatting window's own phase stays in charge. Completion and
+    interruption are never replaced by a child that is still writing.
+    A concrete child action (跑命令, 编辑文件) fills in only while the
+    main turn is running and has not itself opened a specific tool.
+    """
+    if main.phase != "running" or main.detail not in _GENERIC_ACTIVITY:
+        return main
+    best: SessionView | None = None
+    best_at = -1.0
+    for child in children:
+        if child.phase != "running" or not child_belongs_to(child, main):
+            continue
+        if not child.detail or child.detail in _GENERIC_ACTIVITY:
+            continue
+        stamp = child.last_event_at if child.last_event_at is not None else -1.0
+        if best is None or stamp >= best_at:
+            best = child
+            best_at = stamp
+    if best is None:
+        return main
+    shown = copy.copy(main)
+    shown.detail = best.detail
+    return shown
+
+
+_HEAD_LINE_CAP = 8_000_000
+_HEAD_LINE_COUNT = 8
+
+
+def read_session_head(path: Path) -> SessionView:
+    """Read only the leading ``session_meta`` record.
+
+    The meta line is stable for a rollout path and can be large because it
+    embeds base instructions. Callers use it to decide which file is the
+    chatting window without parsing the whole sub-agent transcript.
+    """
+    view = SessionView()
+    with path.open("rb") as handle:
+        for _ in range(_HEAD_LINE_COUNT):
+            raw = handle.readline(_HEAD_LINE_CAP)
+            if not raw:
+                break
+            if len(raw) >= _HEAD_LINE_CAP and not raw.endswith((b"\n", b"\r")):
+                view.child_rollout = True
+                return view
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(record, dict) or record.get("type") != "session_meta":
+                continue
+            payload = record.get("payload")
+            if isinstance(payload, dict):
+                apply_session_meta(view, payload)
+            return view
+    return view
 
 
 def apply_cwd(view: SessionView, cwd: object) -> None:
@@ -759,9 +924,38 @@ def hint_from_hook(body: dict, now: float) -> HookHint:
         detail = "等待确认" if event == "PermissionRequest" else classify_tool(tool)
     elif event == "PostToolUse":
         phase, detail = "running", "思考中"
-    elif event in {"Stop", "SubagentStop", "SessionEnd"}:
+    elif event in {"Stop", "SessionEnd"}:
         phase, detail = "complete", ""
+    elif event == "SubagentStop":
+        # A child finishing is not the chatting window finishing.
+        phase, detail = None, None
     return HookHint(now, phase, detail, cwd, session_id)
+
+
+def scope_hook(hook: HookHint | None, main: SessionView, children: list[SessionView]) -> HookHint | None:
+    """Keep hook updates on the chatting window.
+
+    A matching session id applies as before. A belonging child's running
+    tool can refine the label while the main turn is in progress. Child
+    stop events, and any other session, are dropped so they cannot flash
+    已完成 or move the display onto another rollout.
+    """
+    if hook is None or hook.phase is None:
+        return hook
+    if not hook.session_id or not main.session_id or hook.session_id == main.session_id:
+        return hook
+    if hook.phase != "running" or main.phase != "running" or main.detail not in _GENERIC_ACTIVITY:
+        return None
+    if not hook.detail or hook.detail in _GENERIC_ACTIVITY:
+        return None
+    known = {
+        child.session_id
+        for child in children
+        if child.session_id and child_belongs_to(child, main)
+    }
+    if hook.session_id not in known:
+        return None
+    return HookHint(hook.received_at, "running", hook.detail, None, main.session_id)
 
 
 def local_tz_offset(now: float) -> int:

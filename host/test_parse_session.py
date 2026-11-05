@@ -326,6 +326,8 @@ class MergeAndServerTest(unittest.TestCase):
         self.assertEqual(hint.phase, "complete")
         hint = hint_from_hook({"event": "UserPromptSubmit", "prompt": "secret"}, NOW)
         self.assertEqual(hint.detail, "思考中")
+        hint = hint_from_hook({"hook_event_name": "SubagentStop", "session_id": "child"}, NOW)
+        self.assertIsNone(hint.phase)
 
     def test_missing_sessions_dir(self) -> None:
         import tempfile
@@ -335,6 +337,441 @@ class MergeAndServerTest(unittest.TestCase):
             self.assertFalse(payload["has_session"])
             self.assertEqual(payload["label"], "等待中")
             self.assertIn("sessions", payload["message"])
+
+
+def _line(kind: str, payload: dict, timestamp: str = "2026-11-05T00:23:00Z") -> str:
+    return json.dumps({"timestamp": timestamp, "type": kind, "payload": payload}, ensure_ascii=False)
+
+
+def _tokens(used: int, timestamp: str, weekly: float | None = None) -> str:
+    limits = None
+    if weekly is not None:
+        limits = {
+            "plan_type": "pro",
+            "primary": {"used_percent": weekly, "window_minutes": 10080, "resets_at": 1794356832},
+        }
+    return _line(
+        "event_msg",
+        {
+            "type": "token_count",
+            "info": {
+                "last_token_usage": {"total_tokens": used},
+                "model_context_window": 475000,
+            },
+            "rate_limits": limits,
+        },
+        timestamp,
+    )
+
+
+def _write(day: Path, name: str, text: str, mtime: float) -> Path:
+    path = day / name
+    path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+class MainWindowSelectionTest(unittest.TestCase):
+    def test_child_markers_and_forks(self) -> None:
+        top = parse_jsonl(_line("session_meta", {"id": "child", "parent_thread_id": "main"}))
+        self.assertTrue(parse_session.is_child_session(top))
+        self.assertEqual(top.parent_thread_id, "main")
+
+        nested = parse_jsonl(
+            _line(
+                "session_meta",
+                {
+                    "id": "child",
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "main", "depth": 1}}},
+                },
+            )
+        )
+        self.assertEqual(nested.parent_thread_id, "main")
+        self.assertTrue(parse_session.is_child_session(nested))
+
+        sourced = parse_jsonl(_line("session_meta", {"id": "child", "thread_source": "subagent"}))
+        self.assertTrue(parse_session.is_child_session(sourced))
+
+        mismatch = parse_jsonl(_line("session_meta", {"id": "child", "session_id": "main"}))
+        self.assertEqual(mismatch.parent_thread_id, "main")
+        self.assertTrue(parse_session.is_child_session(mismatch))
+
+        forked = parse_jsonl(
+            _line("session_meta", {"id": "fork", "session_id": "fork", "forked_from_id": "older"})
+        )
+        self.assertFalse(parse_session.is_child_session(forked))
+        self.assertIsNone(forked.parent_thread_id)
+
+        chatting = parse_jsonl(
+            "\n".join(
+                [
+                    _line("session_meta", {"id": "main", "cwd": "/work/App", "source": "cli"}),
+                    _line("inter_agent_communication_metadata", {"trigger_turn": False}),
+                ]
+            )
+        )
+        self.assertFalse(parse_session.is_child_session(chatting))
+
+    def test_newer_child_does_not_steal_context_and_later_writes_do_not_flip_it(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            main = "\n".join(
+                [
+                    _line(
+                        "session_meta",
+                        {
+                            "id": "main-chat",
+                            "session_id": "main-chat",
+                            "cwd": "/Users/me/Developer/NiceShot",
+                            "source": "cli",
+                        },
+                    ),
+                    _line("inter_agent_communication_metadata", {"trigger_turn": False}, "2026-11-05T00:23:01Z"),
+                    _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                    _tokens(218000, "2026-11-05T00:23:05Z", weekly=22),
+                ]
+            )
+            own_child = "\n".join(
+                [
+                    _line(
+                        "session_meta",
+                        {
+                            "id": "child-edit",
+                            "session_id": "main-chat",
+                            "parent_thread_id": "main-chat",
+                            "cwd": "/Users/me/Developer/NiceShot",
+                            "source": {"subagent": {"thread_spawn": {"parent_thread_id": "main-chat", "depth": 1}}},
+                            "thread_source": "subagent",
+                        },
+                    ),
+                    _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:00Z"),
+                    _line(
+                        "event_msg",
+                        {"type": "exec_command_begin", "call_id": "c1", "command": ["echo", "sk-child-secret"]},
+                        "2026-11-05T00:26:20Z",
+                    ),
+                    _tokens(410000, "2026-11-05T00:26:30Z", weekly=86),
+                ]
+            )
+            sibling = "\n".join(
+                [
+                    _line(
+                        "session_meta",
+                        {"id": "child-shell", "parent_thread_id": "main-chat", "cwd": "/Users/me/Developer/NiceShot"},
+                    ),
+                    _line(
+                        "event_msg",
+                        {"type": "exec_command_begin", "call_id": "c0", "command": ["echo", "do-not-leak-prompt"]},
+                        "2026-11-05T00:25:00Z",
+                    ),
+                    _tokens(300000, "2026-11-05T00:25:10Z", weekly=40),
+                ]
+            )
+            foreign = "\n".join(
+                [
+                    _line(
+                        "session_meta",
+                        {"id": "other-child", "parent_thread_id": "someone-else", "thread_source": "subagent"},
+                    ),
+                    _line("event_msg", {"type": "web_search_begin", "call_id": "w"}, "2026-11-05T00:27:00Z"),
+                    _tokens(410000, "2026-11-05T00:27:05Z", weekly=99),
+                ]
+            )
+            _write(day, "rollout-main.jsonl", main, NOW - 40)
+            _write(day, "rollout-shell.jsonl", sibling, NOW - 20)
+            _write(day, "rollout-edit.jsonl", own_child, NOW - 10)
+            _write(day, "rollout-foreign.jsonl", foreign, NOW - 1)
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            first = engine.payload(home, NOW, TZ, None)
+            self.assertEqual(first["session_file"], "rollout-main.jsonl")
+            self.assertEqual(first["session_id"], "main-chat")
+            self.assertEqual(first["context_used_tokens"], 218000)
+            self.assertEqual(first["context_limit_tokens"], 475000)
+            self.assertEqual(first["weekly_used_percent"], 22)
+            self.assertEqual(first["status"], "running")
+            self.assertEqual(first["label"], "执行中 · 跑命令")
+            self.assertEqual(first["detail"], "跑命令")
+            self.assertEqual(first["project_name"], "NiceShot")
+            self.assertEqual(first["turn_elapsed_seconds"], 252)
+            blob = json.dumps(first, ensure_ascii=False)
+            self.assertNotIn("sk-child-secret", blob)
+            self.assertNotIn("do-not-leak-prompt", blob)
+
+            edit_path = day / "rollout-edit.jsonl"
+            with edit_path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    _line(
+                        "event_msg",
+                        {"type": "patch_apply_begin", "call_id": "p1", "patch": "secret patch body"},
+                        "2026-11-05T00:27:08Z",
+                    )
+                    + "\n"
+                )
+            os.utime(edit_path, (NOW + 5, NOW + 5))
+            os.utime(day / "rollout-foreign.jsonl", (NOW + 6, NOW + 6))
+            second = engine.payload(home, NOW, TZ, None)
+            self.assertEqual(second["session_file"], "rollout-main.jsonl")
+            self.assertEqual(second["session_id"], "main-chat")
+            self.assertEqual(second["context_used_tokens"], 218000)
+            self.assertEqual(second["context_used_percent"], first["context_used_percent"])
+            self.assertEqual(second["weekly_used_percent"], 22)
+            self.assertEqual(second["label"], "执行中 · 编辑文件")
+            self.assertNotIn("secret patch body", json.dumps(second, ensure_ascii=False))
+
+    def test_main_completion_and_interruption_stay_on_the_chatting_window(self) -> None:
+        import tempfile
+
+        def scenario(ending: str) -> dict:
+            with tempfile.TemporaryDirectory() as tmp:
+                day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+                day.mkdir(parents=True)
+                _write(
+                    day,
+                    "rollout-main.jsonl",
+                    "\n".join(
+                        [
+                            _line("session_meta", {"id": "main-chat", "cwd": "/Users/me/Developer/NiceShot", "source": "cli"}),
+                            _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                            _tokens(218000, "2026-11-05T00:26:00Z", weekly=22),
+                            _line("event_msg", {"type": ending, "duration_ms": 180000}, "2026-11-05T00:26:40Z"),
+                        ]
+                    ),
+                    NOW - 5,
+                )
+                _write(
+                    day,
+                    "rollout-child.jsonl",
+                    "\n".join(
+                        [
+                            _line(
+                                "session_meta",
+                                {"id": "child", "parent_thread_id": "main-chat", "thread_source": "subagent"},
+                            ),
+                            _line("event_msg", {"type": "task_started"}, "2026-11-05T00:27:00Z"),
+                            _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:27:05Z"),
+                            _tokens(410000, "2026-11-05T00:27:06Z", weekly=86),
+                        ]
+                    ),
+                    NOW,
+                )
+                return Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+
+        done = scenario("task_complete")
+        self.assertEqual(done["session_file"], "rollout-main.jsonl")
+        self.assertEqual(done["status"], "complete")
+        self.assertEqual(done["label"], "已完成")
+        self.assertEqual(done["color"], "green")
+        self.assertEqual(done["context_used_tokens"], 218000)
+        self.assertEqual(done["weekly_used_percent"], 22)
+        self.assertEqual(done["turn_elapsed_text"], "3分0秒")
+
+        stopped = scenario("turn_aborted")
+        self.assertEqual(stopped["session_file"], "rollout-main.jsonl")
+        self.assertEqual(stopped["status"], "interrupted")
+        self.assertEqual(stopped["label"], "已中断")
+        self.assertEqual(stopped["color"], "red")
+        self.assertEqual(stopped["context_used_tokens"], 218000)
+        self.assertNotEqual(stopped["context_used_tokens"], 410000)
+
+    def test_nested_source_and_thread_source_cannot_become_the_window(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {"id": "main-chat", "cwd": "/Users/me/Developer/NiceShot", "source": "cli", "forked_from_id": "older-chat"},
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                        _tokens(218000, "2026-11-05T00:24:00Z"),
+                    ]
+                ),
+                NOW - 30,
+            )
+            _write(
+                day,
+                "rollout-nested.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {
+                                "id": "nested",
+                                "session_id": "main-chat",
+                                "source": {
+                                    "subagent": {
+                                        "thread_spawn": {
+                                            "parent_thread_id": "main-chat",
+                                            "depth": 2,
+                                            "agent_role": "explorer",
+                                        }
+                                    }
+                                },
+                            },
+                        ),
+                        _line("event_msg", {"type": "patch_apply_begin", "call_id": "p"}, "2026-11-05T00:27:00Z"),
+                        _tokens(410000, "2026-11-05T00:27:02Z"),
+                    ]
+                ),
+                NOW - 1,
+            )
+            _write(
+                day,
+                "rollout-guardian.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "guard", "thread_source": "guardian_review"}),
+                        _tokens(50000, "2026-11-05T00:27:03Z"),
+                    ]
+                ),
+                NOW,
+            )
+            payload = Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+            self.assertEqual(payload["session_file"], "rollout-main.jsonl")
+            self.assertEqual(payload["session_id"], "main-chat")
+            self.assertEqual(payload["context_used_tokens"], 218000)
+            self.assertEqual(payload["label"], "执行中 · 编辑文件")
+            self.assertEqual(payload["status"], "running")
+
+    def test_child_keeps_a_quiet_main_turn_from_looking_idle(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "main-chat", "cwd": "/work/App"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:00:01Z"),
+                        _tokens(218000, "2026-11-05T00:00:02Z"),
+                    ]
+                ),
+                NOW - 31 * 60,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "child", "parent_thread_id": "main-chat"}),
+                        _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:27:00Z"),
+                        _tokens(410000, "2026-11-05T00:27:01Z"),
+                    ]
+                ),
+                NOW,
+            )
+            payload = Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+            self.assertFalse(payload["stale"])
+            self.assertEqual(payload["status"], "running")
+            self.assertEqual(payload["label"], "执行中 · 跑命令")
+            self.assertEqual(payload["context_used_tokens"], 218000)
+            self.assertEqual(payload["session_file"], "rollout-main.jsonl")
+
+    def test_quota_donor_still_works_and_child_quota_does_not_replace_it(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            older = day / "rollout-old.jsonl"
+            older.write_text((FIXTURES / "weekly_only.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
+            os.utime(older, (NOW - 80, NOW - 80))
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "live", "cwd": "/Users/me/Developer/NiceShot", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:10Z"),
+                        _line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-05T00:26:12Z"),
+                        _tokens(218000, "2026-11-05T00:26:20Z"),
+                    ]
+                ),
+                NOW - 30,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "child", "parent_thread_id": "live"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:27:00Z"),
+                        _tokens(410000, "2026-11-05T00:27:05Z", weekly=99),
+                    ]
+                ),
+                NOW,
+            )
+            payload = Engine().payload(Path(tmp) / ".codex", NOW, TZ, None)
+            self.assertEqual(payload["session_file"], "rollout-main.jsonl")
+            self.assertEqual(payload["context_used_tokens"], 218000)
+            self.assertEqual(payload["weekly_used_percent"], 16)
+            self.assertEqual(payload["plan_name"], "Pro")
+            self.assertIsNone(payload["five_hour_used_percent"])
+            self.assertNotEqual(payload["weekly_used_percent"], 99)
+
+    def test_hooks_follow_the_main_window(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "main-chat", "cwd": "/Users/me/Developer/NiceShot", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                        _tokens(218000, "2026-11-05T00:24:00Z", weekly=22),
+                    ]
+                ),
+                NOW - 5,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "child", "parent_thread_id": "main-chat"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:00Z"),
+                    ]
+                ),
+                NOW,
+            )
+            home = Path(tmp) / ".codex"
+            engine = Engine()
+            child_stop = HookHint(NOW, "complete", "", None, "child")
+            held = engine.payload(home, NOW, TZ, child_stop)
+            self.assertEqual(held["status"], "running")
+            self.assertEqual(held["context_used_tokens"], 218000)
+            self.assertEqual(held["session_file"], "rollout-main.jsonl")
+
+            child_tool = HookHint(NOW, "running", "编辑文件", None, "child")
+            hinted = engine.payload(home, NOW, TZ, child_tool)
+            self.assertEqual(hinted["label"], "执行中 · 编辑文件")
+            self.assertEqual(hinted["context_used_tokens"], 218000)
+            self.assertTrue(hinted["hook_fresh"])
+
+            main_done = HookHint(NOW, "complete", "", None, "main-chat")
+            finished = engine.payload(home, NOW, TZ, main_done)
+            self.assertEqual(finished["status"], "complete")
+            self.assertEqual(finished["label"], "已完成")
+            self.assertEqual(finished["color"], "green")
+            self.assertEqual(finished["context_used_tokens"], 218000)
+            self.assertEqual(finished["session_id"], "main-chat")
 
 
 class FontCoverageTest(unittest.TestCase):

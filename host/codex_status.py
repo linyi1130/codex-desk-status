@@ -31,11 +31,16 @@ from parse_session import (
     SessionFollower,
     SessionView,
     build_payload,
+    child_belongs_to,
     empty_payload,
     hint_from_hook,
+    is_child_session,
     local_tz_offset,
     merge_quota,
+    overlay_child_progress,
     parse_file,
+    read_session_head,
+    scope_hook,
 )
 
 
@@ -72,6 +77,8 @@ class Engine:
     def __init__(self) -> None:
         self.follower = SessionFollower()
         self.cache: dict[str, tuple[int, int, SessionView]] = {}
+        # session_meta is the first record and does not change when the file grows.
+        self.heads: dict[str, tuple[int, SessionView]] = {}
 
     def payload(
         self,
@@ -85,38 +92,123 @@ class Engine:
         if not files:
             message = "还没有 Codex 会话" if sessions.is_dir() else "找不到 ~/.codex/sessions"
             return empty_payload(now, tz_offset_seconds, message)
-        active = files[0]
+        active = self.select_main(files)
         try:
             view = self.follower.sync(active)
         except OSError as exc:
             log(f"无法读取 {active.name}: {exc}")
             return empty_payload(now, tz_offset_seconds, "会话文件暂时读不了")
-        donors: list[SessionView] = []
-        for path in files[:DONOR_LIMIT]:
-            if path == active:
-                if view.weekly or view.five_hour:
-                    donors.append(view)
-                continue
-            try:
-                donors.append(self.cached(path))
-            except OSError as exc:
-                log(f"跳过 {path.name}: {exc}")
+        donors, children = self.companions(files, active, view)
         merged = merge_quota(view, donors)
-        try:
-            mtime = active.stat().st_mtime
-        except OSError:
-            mtime = None
+        child_views = [child for _, child in children]
+        shown = overlay_child_progress(merged, child_views)
         payload = build_payload(
-            merged,
+            shown,
             now,
             tz_offset_seconds=tz_offset_seconds,
             session_file=active.name,
-            file_mtime=mtime,
-            hook=hook,
+            file_mtime=self.display_mtime(active, shown, children),
+            hook=scope_hook(hook, view, child_views),
         )
         if payload["source"] == "session" and not payload["has_session"]:
             payload["has_session"] = True
         return payload
+
+    def select_main(self, files: list[Path]) -> Path:
+        """Newest rollout that is the user's chatting window.
+
+        Sub-agent files are often written a moment after the parent, and
+        several siblings of one turn get writes within the same second.
+        Following mtime alone swaps context percent between those files.
+        The parent has no ``parent_thread_id``; children do. A fork
+        (``forked_from_id``) is still a chatting window.
+        """
+        for path in files:
+            try:
+                if not is_child_session(self.head(path)):
+                    return path
+            except OSError as exc:
+                log(f"跳过 {path.name}: {exc}")
+        return files[0]
+
+    def companions(
+        self,
+        files: list[Path],
+        main_path: Path,
+        main_view: SessionView,
+    ) -> tuple[list[SessionView], list[tuple[Path, SessionView]]]:
+        """Quota donors are other chatting windows. Children only hint progress.
+
+        Donors stay capped at ``DONOR_LIMIT`` non-child files, skipping
+        sub-agent rollouts so a burst of child writes cannot crowd out the
+        session that actually has rate-limit numbers.
+        """
+        donors: list[SessionView] = []
+        if main_view.weekly or main_view.five_hour:
+            donors.append(main_view)
+        children: list[tuple[Path, SessionView]] = []
+        main_has_quota = bool(main_view.weekly or main_view.five_hour)
+        roots_seen = 0
+        for path in files:
+            if path == main_path:
+                continue
+            try:
+                head = self.head(path)
+            except OSError as exc:
+                log(f"跳过 {path.name}: {exc}")
+                continue
+            if is_child_session(head):
+                if len(children) >= DONOR_LIMIT or not child_belongs_to(head, main_view):
+                    continue
+                try:
+                    children.append((path, self.cached(path)))
+                except OSError as exc:
+                    log(f"跳过 {path.name}: {exc}")
+                continue
+            roots_seen += 1
+            if not main_has_quota and len(donors) < DONOR_LIMIT:
+                try:
+                    donors.append(self.cached(path))
+                except OSError as exc:
+                    log(f"跳过 {path.name}: {exc}")
+            if roots_seen >= DONOR_LIMIT and (main_has_quota or len(donors) >= DONOR_LIMIT):
+                break
+        return donors, children
+
+    def display_mtime(
+        self,
+        main_path: Path,
+        shown: SessionView,
+        children: list[tuple[Path, SessionView]],
+    ) -> float | None:
+        try:
+            mtime = main_path.stat().st_mtime
+        except OSError:
+            return None
+        if shown.phase != "running":
+            return mtime
+        for path, child in children:
+            if child.phase != "running":
+                continue
+            try:
+                mtime = max(mtime, path.stat().st_mtime)
+            except OSError:
+                continue
+        return mtime
+
+    def head(self, path: Path) -> SessionView:
+        stat = path.stat()
+        key = str(path)
+        found = self.heads.get(key)
+        # The leading session_meta record is stable while the file grows.
+        if found and stat.st_size >= found[0]:
+            return found[1]
+        view = read_session_head(path)
+        self.heads[key] = (stat.st_size, view)
+        if len(self.heads) > 512:
+            self.heads.clear()
+            self.heads[key] = (stat.st_size, view)
+        return view
 
     def cached(self, path: Path) -> SessionView:
         stat = path.stat()

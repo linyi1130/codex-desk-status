@@ -14,7 +14,7 @@
 2. 开发板连上 Wi-Fi，用 mDNS 找 `codex-status.local`，失败再用 `config.h` 里的备用地址，然后把 JSON 画出来。固件里没有 OpenAI / Codex 的 token。
 3. 可选的 hook 只是让「开始一轮 / 调用工具 / 结束」更快反映到屏幕上。额度数字仍然来自会话日志。
 
-CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。状态跟最近被写入的那个 `rollout-*.jsonl`。额度若在这个文件里是 `null`，会再看另外几个最近的会话，避免被一次空快照清掉。Pro 套餐经常只有周额度（`window_minutes` 为 10080），五小时窗口可能不存在；两种都解析。五小时用量在 JSON 里，170 像素高的屏幕按设计稿只画「本周额度」和「上下文」。
+CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。屏幕跟着用户正在聊的主会话：在最近写入的 `rollout-*.jsonl` 里，选不是子代理的那一个。子代理文件（`session_meta` 里的 `parent_thread_id`，或 `source.subagent` / `thread_source` 标成子会话）即使写得更晚，也不替换主会话的身份、上下文 token 和额度；它最多给主会话的「执行中」补一个动作（思考中、跑命令、编辑文件）。主会话自己结束时仍是绿色「已完成」（屏幕会白闪），中断时是红色「已中断」。额度若在主会话文件里是 `null`，会再看另外几个最近的主会话，避免被一次空快照清掉。Pro 套餐经常只有周额度（`window_minutes` 为 10080），五小时窗口可能不存在；两种都解析。五小时用量在 JSON 里，170 像素高的屏幕按设计稿只画「本周额度」和「上下文」。
 
 ## 目录
 
@@ -212,7 +212,7 @@ pio device monitor
 python3 -m unittest discover -s host -v
 ```
 
-样例覆盖：周额度在 secondary、Pro 只有周额度且放在 primary、camelCase、`resets_in_seconds`、`rate_limits: null` 不能把已有额度清掉、上下文用最后一轮的 token 而不是整段会话累计、命令参数不会出现在 JSON 里、本机 hook 能把「已完成」立刻改成「执行中 · 跑命令」、非本机的 hook 地址会被拒绝。
+样例覆盖：周额度在 secondary、Pro 只有周额度且放在 primary、camelCase、`resets_in_seconds`、`rate_limits: null` 不能把已有额度清掉、上下文用最后一轮的 token 而不是整段会话累计、命令参数不会出现在 JSON 里、本机 hook 能把「已完成」立刻改成「执行中 · 跑命令」、非本机的 hook 地址会被拒绝、更新的子代理文件不会抢走主会话的上下文或额度，主会话的完成和中断仍会显示。
 
 ## 隐私
 
