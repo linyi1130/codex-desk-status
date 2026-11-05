@@ -20,6 +20,8 @@ CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。正在跑的窗口
 
 电量不在 JSON 里。固件用 GPIO4 读电池分压（一半，所以乘 2）。高于 4.3V 是充电器电压，显示 `USB`；低于 2.5V 当作没有电池，显示「无电」。这两种都不编百分比。要在板上看到页码和电量，需要重新烧录；只更新 Mac 边车时，翻页和完成提醒已经会跟着 `/status` 变。
 
+每一页的 `summary` 是这一页自己的短句，画在上下文和底部之间，用来分辨当前窗口。主会话取最近一条用户请求里去掉套话之后的那句；子代理优先用 `spawn_agent` 的 `task_name`（写在 `session_meta.agent_path` 上）。`turn_context.summary` 只是 `auto` 这类开关，不当成摘要。没有能用的句子时这个字段是 `null`。响应里只有截断后的一行，没有完整提示词或命令。
+
 ## 目录
 
 | 路径 | 作用 |
@@ -98,6 +100,7 @@ python3 host/codex_status.py \
   "stale": false,
   "hook_fresh": false,
   "footer": "NiceShot · 本轮已运行 4分12秒",
+  "summary": null,
   "message": null
 }
 ```

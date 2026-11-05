@@ -19,17 +19,19 @@ constexpr int kWidth = 320;
 constexpr int kHeight = 170;
 constexpr int kPad = 14;
 constexpr int kRight = 306;
-constexpr int kStatusY = 8;
+constexpr int kStatusY = 4;
 constexpr int kDotCx = 20;
-constexpr int kDotCy = 17;
-constexpr int kLabel1Y = 36;
-constexpr int kBar1Y = 56;
-constexpr int kBarH = 12;
-constexpr int kSub1Y = 72;
-constexpr int kLabel2Y = 92;
-constexpr int kBar2Y = 112;
-constexpr int kSub2Y = 128;
-constexpr int kFootY = 148;
+constexpr int kDotCy = 12;
+constexpr int kLabel1Y = 24;
+constexpr int kBar1Y = 42;
+constexpr int kBarH = 10;
+constexpr int kSub1Y = 54;
+constexpr int kLabel2Y = 70;
+constexpr int kBar2Y = 88;
+constexpr int kSub2Y = 100;
+constexpr int kSummaryY = 116;
+constexpr int kSummaryStep = 14;
+constexpr int kFootY = 150;
 
 DeskDisplay tft;
 LGFX_Sprite canvas(&tft);
@@ -202,6 +204,42 @@ void drawBatteryIcon(Gfx& gfx, int x, int y, uint16_t color) {
 }
 
 template <typename Gfx>
+void drawSummary(Gfx& gfx, const char* text) {
+  const int width = kRight - kPad;
+  if (textWidth(FONT_SUB, text) <= width) {
+    drawText(gfx, FONT_SUB, kPad, kSummaryY, text, kDim, kRight, kHeight);
+    return;
+  }
+  const char* cursor = text;
+  const char* split = text;
+  int used = 0;
+  uint16_t cp = 0;
+  while (*cursor) {
+    nextCodepoint(cursor, cp);
+    const int advance = glyphAdvance(FONT_SUB, cp);
+    if (used + advance > width) {
+      break;
+    }
+    used += advance;
+    split = cursor;
+  }
+  if (split == text) {
+    drawTextFit(gfx, FONT_SUB, kPad, kSummaryY, text, kDim, kRight, kHeight);
+    return;
+  }
+  char line[160];
+  const size_t count = static_cast<size_t>(split - text);
+  if (count >= sizeof(line)) {
+    drawTextFit(gfx, FONT_SUB, kPad, kSummaryY, text, kDim, kRight, kHeight);
+    return;
+  }
+  memcpy(line, text, count);
+  line[count] = 0;
+  drawText(gfx, FONT_SUB, kPad, kSummaryY, line, kDim, kRight, kHeight);
+  drawTextFit(gfx, FONT_SUB, kPad, kSummaryY + kSummaryStep, split, kDim, kRight, kHeight);
+}
+
+template <typename Gfx>
 void paintTo(Gfx& gfx) {
   gfx.fillRect(0, 0, kWidth, kHeight, kBg);
 
@@ -256,6 +294,10 @@ void paintTo(Gfx& gfx) {
   drawText(gfx, FONT_NUM, kRight - textWidth(FONT_NUM, pct), kLabel2Y + (FONT_UI.lineHeight - FONT_NUM.lineHeight) / 2, pct, kWhite, kWidth, kHeight);
   drawBar(gfx, kBar2Y, context);
   drawTextFit(gfx, FONT_SUB, kPad, kSub2Y, contextSub, kDim, kRight, kHeight);
+
+  if (showMeters && gState.summary[0]) {
+    drawSummary(gfx, gState.summary);
+  }
 
   char footer[96];
   composeFooter(footer, sizeof(footer));

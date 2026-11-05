@@ -34,6 +34,7 @@ struct DeskState {
   char batteryText[8] = "";
   int pageIndex = 1;
   int pageCount = 1;
+  char summary[160] = "";
 };
 
 extern DeskState gState;

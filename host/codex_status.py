@@ -475,7 +475,8 @@ HTML_PAGE = """<!DOCTYPE html>
   .track { height: 12px; background: #2c3548; border-radius: 999px; margin-top: 4px; overflow: hidden; }
   .fill { height: 100%; border-radius: 999px; }
   .sub { color: #8b95a8; font-size: 12px; margin-top: 3px; }
-  .foot { color: #4c9aff; font-size: 13px; margin-top: 8px; }
+  .foot { color: #4c9aff; font-size: 13px; margin-top: 4px; }
+  .summary { color: #8b95a8; font-size: 12px; line-height: 14px; max-height: 28px; overflow: hidden; margin-top: 2px; }
   pre { background: #121722; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; }
   p.note { color: #9aa3b5; font-size: 13px; }
 </style>
@@ -503,6 +504,7 @@ function render(data) {
   const reset = (data.weekly_reset_text || "暂无数据") + plan;
   const ctx = data.context_text || "暂无数据";
   const page = (data.page_count > 1) ? `<span class="page">${data.page_index}/${data.page_count}</span>` : "";
+  const summary = data.summary ? `<div class="summary">${esc(data.summary)}</div>` : "";
   const w = weekly == null ? 0 : Math.max(0, Math.min(100, weekly));
   const c = context == null ? 0 : Math.max(0, Math.min(100, context));
   document.getElementById("screen").innerHTML = `
@@ -513,6 +515,7 @@ function render(data) {
     <div class="row label"><div>上下文</div><div class="pct">${context == null ? "--" : Math.round(context) + "%"}</div></div>
     <div class="track"><div class="fill" style="width:${c}%;background:${barColor(context)}"></div></div>
     <div class="sub">${esc(ctx)}</div>
+    ${summary}
     <div class="foot">${esc(data.footer || "")}</div>`;
   document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
 }

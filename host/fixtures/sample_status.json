@@ -34,5 +34,6 @@
   "stale": false,
   "hook_fresh": false,
   "footer": "NiceShot · 本轮已运行 4分12秒",
+  "summary": null,
   "message": null
 }

@@ -91,6 +91,13 @@ void showDemo(uint8_t index) {
   gState.turnStartedAt = frame.running ? gState.unixBase - frame.elapsed : 0;
   gState.pageIndex = (index == 0) ? 2 : 1;
   gState.pageCount = (index == 0) ? 4 : 1;
+  const char* summary = "";
+  if (index == 0 || index == 1 || index == 2) {
+    summary = "请把桌面状态改一下";
+  } else if (index == 3) {
+    summary = "请查一下本周额度";
+  }
+  strlcpy(gState.summary, summary, sizeof(gState.summary));
   if (frame.link == LINK_WIFI) {
     applyBattery(batteryMake(BAT_USB, -1, 5000));
   } else if (frame.link == LINK_STALE) {

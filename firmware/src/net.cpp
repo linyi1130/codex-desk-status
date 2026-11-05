@@ -108,6 +108,8 @@ void applyJson(const String& body) {
   if (pageIndex > pageCount) pageIndex = pageCount;
   gState.pageIndex = pageIndex;
   gState.pageCount = pageCount;
+  const char* summary = doc["summary"] | "";
+  copyText(gState.summary, sizeof(gState.summary), summary);
   gState.link = LINK_OK;
   uiNoteComplete(previous);
   Serial.printf("状态 %s  周额度 %.0f%%  上下文 %.0f%%\n", gState.label, gState.weekly, gState.context);

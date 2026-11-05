@@ -960,6 +960,144 @@ class MainWindowSelectionTest(unittest.TestCase):
             self.assertEqual(finished["session_id"], "main-chat")
 
 
+class SummaryTest(unittest.TestCase):
+    def test_user_chat_skips_shared_wrapper_and_keeps_its_own_line(self) -> None:
+        blob = "AGENTS.md instructions\n" + ("shared developer context " * 40)
+        wrapper = "\n".join(
+            [
+                "My request for Codex:",
+                "Context follows.",
+                "End of wrapper.",
+                "请把桌面状态改一下",
+            ]
+        )
+        text = "\n".join(
+            [
+                '{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"main","thread_source":"user","cwd":"/work/App"}}',
+                '{"timestamp":"2026-11-05T00:23:01Z","type":"turn_context","payload":{"cwd":"/work/App","summary":"auto"}}',
+                '{"timestamp":"2026-11-05T00:23:02Z","type":"event_msg","payload":{"type":"user_message","message":' + json.dumps(blob) + "}}",
+                '{"timestamp":"2026-11-05T00:26:00Z","type":"event_msg","payload":{"type":"user_message","message":' + json.dumps(wrapper) + "}}",
+                '{"timestamp":"2026-11-05T00:26:01Z","type":"event_msg","payload":{"type":"user_message","message":"npm test && echo sk-test-do-not-leak"}}',
+            ]
+        )
+        view = parse_jsonl(text)
+        payload = parse_session.build_payload(view, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
+        self.assertEqual(payload["summary"], "请把桌面状态改一下")
+        blob_out = json.dumps(payload, ensure_ascii=False)
+        self.assertNotIn("sk-test-do-not-leak", blob_out)
+        self.assertNotIn("npm test", blob_out)
+        self.assertNotIn("developer context", blob_out)
+        self.assertNotIn("My request for Codex", blob_out)
+
+    def test_child_page_uses_its_task_name_not_the_parent_request(self) -> None:
+        parent_line = "请把桌面状态改一下"
+        shared_agent = "\n".join(["Shared opening line.", "请查一下本周额度", "Shared closing line."])
+        parent = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"main","thread_source":"user","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:26:00Z","type":"event_msg","payload":{"type":"user_message","message":' + json.dumps(parent_line) + "}}",
+                ]
+            )
+        )
+        child = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:26:10Z","type":"session_meta","payload":{"id":"child","parent_thread_id":"main","thread_source":"subagent","agent_path":"fix_battery","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:26:11Z","type":"turn_context","payload":{"summary":"auto","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:26:12Z","type":"event_msg","payload":{"type":"user_message","message":' + json.dumps(parent_line) + "}}",
+                    '{"timestamp":"2026-11-05T00:26:20Z","type":"event_msg","payload":{"type":"agent_message","message":' + json.dumps(shared_agent) + "}}",
+                ]
+            )
+        )
+        parent_payload = parse_session.build_payload(parent, NOW, tz_offset_seconds=TZ, session_file="p.jsonl", file_mtime=NOW)
+        child_payload = parse_session.build_payload(child, NOW, tz_offset_seconds=TZ, session_file="c.jsonl", file_mtime=NOW)
+        self.assertEqual(parent_payload["summary"], "请把桌面状态改一下")
+        self.assertEqual(child_payload["summary"], "fix battery")
+        self.assertNotEqual(child_payload["summary"], parent_payload["summary"])
+
+    def test_child_without_task_name_uses_the_middle_agent_line(self) -> None:
+        shared_agent = "\n".join(["Shared opening line.", "请查一下本周额度", "Shared closing line."])
+        child = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:26:10Z","type":"session_meta","payload":{"id":"child","parent_thread_id":"main","source":{"subagent":{"thread_spawn":{"parent_thread_id":"main","depth":1}}}}}',
+                    '{"timestamp":"2026-11-05T00:26:12Z","type":"event_msg","payload":{"type":"user_message","message":"请把桌面状态改一下"}}',
+                    '{"timestamp":"2026-11-05T00:26:20Z","type":"event_msg","payload":{"type":"agent_message","message":' + json.dumps(shared_agent) + "}}",
+                ]
+            )
+        )
+        payload = parse_session.build_payload(child, NOW, tz_offset_seconds=TZ, session_file="c.jsonl", file_mtime=NOW)
+        self.assertEqual(payload["summary"], "请查一下本周额度")
+        self.assertNotIn("Shared opening", json.dumps(payload, ensure_ascii=False))
+
+    def test_empty_summary_when_only_boilerplate_exists(self) -> None:
+        view = parse_jsonl(
+            "\n".join(
+                [
+                    '{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"main","cwd":"/work/App"}}',
+                    '{"timestamp":"2026-11-05T00:23:01Z","type":"turn_context","payload":{"summary":"none"}}',
+                    '{"timestamp":"2026-11-05T00:23:02Z","type":"event_msg","payload":{"type":"user_message","message":"My request for Codex:\\nContext follows:\\nEnd of wrapper:"}}',
+                ]
+            )
+        )
+        payload = parse_session.build_payload(view, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
+        self.assertIsNone(payload["summary"])
+
+    def test_status_pages_keep_separate_summaries(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            day = Path(tmp) / ".codex" / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "main-chat", "thread_source": "user", "cwd": "/work/App", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                        _line("event_msg", {"type": "user_message", "message": "请把桌面状态改一下"}, "2026-11-05T00:26:00Z"),
+                        _tokens(218000, "2026-11-05T00:26:05Z", weekly=22),
+                    ]
+                ),
+                NOW - 10,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {
+                                "id": "child",
+                                "parent_thread_id": "main-chat",
+                                "thread_source": "subagent",
+                                "agent_path": "fix_battery",
+                                "cwd": "/work/App",
+                            },
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:20Z"),
+                        _line("event_msg", {"type": "user_message", "message": "请把桌面状态改一下"}, "2026-11-05T00:26:21Z"),
+                        _tokens(410000, "2026-11-05T00:26:30Z"),
+                    ]
+                ),
+                NOW,
+            )
+            engine = Engine()
+            home = Path(tmp) / ".codex"
+            parent = engine.payload(home, NOW, TZ, None)
+            child = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(parent["session_id"], "main-chat")
+            self.assertEqual(parent["summary"], "请把桌面状态改一下")
+            self.assertEqual(parent["context_used_tokens"], 218000)
+            self.assertEqual(child["session_id"], "child")
+            self.assertEqual(child["summary"], "fix battery")
+            self.assertEqual(child["context_used_tokens"], 410000)
+            self.assertEqual(child["page_index"], 2)
+
+
 class FontCoverageTest(unittest.TestCase):
     def test_generated_font_covers_interface_copy(self) -> None:
         header = ROOT.parent / "firmware" / "src" / "font_zh.cpp"

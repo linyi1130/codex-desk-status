@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -103,6 +104,10 @@ class SessionView:
     # chatting window; on a child it names the root of that agent tree.
     root_session_id: str | None = None
     thread_source: str | None = None
+    agent_path: str | None = None
+    # Short display strings only. Raw prompts and tool arguments are never kept.
+    user_summary: str | None = None
+    agent_summary: str | None = None
     # True when source/thread_source mark a sub-agent even if the parent id
     # was not copied onto the top-level field. Also set when the first line
     # of a rollout could not be parsed, so that file cannot steal the display.
@@ -295,6 +300,11 @@ def apply_session_meta(view: SessionView, payload: dict) -> None:
             view.child_rollout = True
     if source_marks_child(source):
         view.child_rollout = True
+    agent_path = _text(payload.get("agent_path")) or _text(payload.get("agentPath"))
+    if not agent_path:
+        agent_path = nested_agent_path(source)
+    if agent_path:
+        view.agent_path = agent_path
     if isinstance(source, str) and source.strip():
         view.client = source.strip()
     else:
@@ -411,6 +421,204 @@ def project_name(cwd: str) -> str:
     return name
 
 
+# Two lines of the small face, plus a little headroom. Not a transcript.
+_SUMMARY_LIMIT = 48
+_REQUEST_MARKER = "## My request for Codex:"
+_SECRET_TEXT = re.compile(r"(?i)(sk-[a-z0-9]|api[_-]?key|bearer\s|password\s*=|token\s*=)")
+_SHELL_LINE = re.compile(r"(?i)^(npm|pnpm|yarn|git|curl|wget|python3?|bash|sh|sudo|cargo|go)\b")
+_TASK_NAME = re.compile(r"^[A-Za-z0-9_]{1,40}$")
+_MODE_WORDS = {"none", "auto", "concise", "detailed", "null", "off", "on"}
+
+
+def nested_agent_path(source: object) -> str | None:
+    if not isinstance(source, dict):
+        return None
+    sub = source.get("subagent")
+    if not isinstance(sub, dict):
+        return None
+    spawn = sub.get("thread_spawn")
+    if not isinstance(spawn, dict):
+        return None
+    return _text(spawn.get("agent_path")) or _text(spawn.get("agentPath"))
+
+
+def message_text(payload: dict) -> str | None:
+    """Visible text of one message. Callers keep only a clipped excerpt."""
+    message = payload.get("message")
+    if isinstance(message, str):
+        return message
+    content = payload.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text)
+        if parts:
+            return "\n".join(parts)
+    return None
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _boilerplate_line(line: str) -> bool:
+    """Shared wrappers, not the request itself.
+
+    ``turn_context.summary`` is a mode such as ``auto`` and never reaches here.
+    The live chats also share a 21-character ASCII prefix (``My request for Codex:``)
+    and a short leading wrapper, identical on the parent and its sub-agents.
+    """
+    if not line:
+        return True
+    lowered = line.lower()
+    if lowered in _MODE_WORDS:
+        return True
+    if line in {_REQUEST_MARKER, "My request for Codex:"} or lowered == "my request for codex:":
+        return True
+    if line.startswith(("# Context from my IDE", "# AGENTS.md", "<", "</")):
+        return True
+    if line.startswith("#") and len(line) <= 80:
+        return True
+    if line.isascii() and len(line) <= 32 and line.endswith(":"):
+        return True
+    if _SECRET_TEXT.search(line) or _SHELL_LINE.match(line):
+        return True
+    return False
+
+
+def _clip_summary(text: str) -> str:
+    collapsed = _collapse(text)
+    if len(collapsed) <= _SUMMARY_LIMIT:
+        return collapsed
+    return collapsed[: _SUMMARY_LIMIT - 1].rstrip() + "…"
+
+
+def _candidate_lines(text: str) -> list[str]:
+    body = text
+    marker = body.find(_REQUEST_MARKER)
+    if marker >= 0:
+        body = body[marker + len(_REQUEST_MARKER) :]
+    lines: list[str] = []
+    for raw in body.splitlines():
+        line = _collapse(raw)
+        if _boilerplate_line(line):
+            continue
+        lines.append(line)
+    # A repeated 3-line ASCII wrapper sits in front of the real request.
+    if len(lines) > 1:
+        wrapper = 0
+        for line in lines[:3]:
+            if line.isascii() and len(line) <= 40:
+                wrapper += 1
+            else:
+                break
+        if wrapper and wrapper < len(lines):
+            lines = lines[wrapper:]
+    return lines
+
+
+def _pick_user_excerpt(text: str) -> str | None:
+    lines = _candidate_lines(text)
+    if not lines:
+        return None
+    short_cjk = [line for line in lines if _has_cjk(line) and 2 <= len(line) <= 40]
+    if short_cjk:
+        return _clip_summary(short_cjk[-1])
+    first = lines[0]
+    if len(first) > 120 and not _has_cjk(first):
+        return None
+    return _clip_summary(first)
+
+
+def _pick_agent_excerpt(text: str) -> str | None:
+    """A line that can differ per session.
+
+    In current rollouts the first and last lines of an agent message are
+    shared by the parent and its children. A middle line is the one that changes.
+    """
+    lines = _candidate_lines(text)
+    if not lines:
+        return None
+    if len(lines) >= 3:
+        choices = lines[1:-1]
+    elif len(lines) == 2 and lines[0].isascii() and len(lines[0]) <= 40:
+        choices = lines[1:]
+    elif len(lines) == 1 and lines[0].isascii() and len(lines[0]) <= 40:
+        return None
+    else:
+        choices = lines
+    cjk = [line for line in choices if _has_cjk(line)]
+    return _clip_summary(cjk[0] if cjk else choices[0])
+
+
+def task_label(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = value.strip().replace("\\", "/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    if not _TASK_NAME.fullmatch(text) or text.lower() in _MODE_WORDS:
+        return None
+    return text.replace("_", " ")
+
+
+def note_user_text(view: SessionView, text: str | None) -> None:
+    if not text:
+        return
+    excerpt = _pick_user_excerpt(text)
+    if excerpt:
+        view.user_summary = excerpt
+
+
+def note_agent_text(view: SessionView, text: str | None) -> None:
+    if not text:
+        return
+    excerpt = _pick_agent_excerpt(text)
+    if excerpt:
+        view.agent_summary = excerpt
+
+
+def note_goal(view: SessionView, payload: dict) -> None:
+    goal = payload.get("goal")
+    if not isinstance(goal, dict):
+        return
+    objective = goal.get("objective")
+    if not isinstance(objective, str):
+        return
+    excerpt = _pick_user_excerpt(objective)
+    if excerpt and not view.user_summary:
+        view.user_summary = excerpt
+
+
+def session_summary(view: SessionView) -> str | None:
+    """One short line for this rollout, never a sibling's request.
+
+    A sub-agent page prefers its own task name (``agent_path``, which Codex
+    sets from ``spawn_agent.task_name``). It does not fall back to the user
+    text, because forked history repeats the parent's request. ``turn_context.summary``
+    is a reasoning-summary mode and is ignored.
+    """
+    if is_child_session(view):
+        task = task_label(view.agent_path)
+        if task:
+            return task
+        if view.agent_summary:
+            return view.agent_summary
+        return None
+    return view.user_summary
+
+
 def apply_event(view: SessionView, payload: dict, timestamp: float | None) -> None:
     kind = str(payload.get("type") or "")
     if kind in START_EVENTS:
@@ -429,8 +637,12 @@ def apply_event(view: SessionView, payload: dict, timestamp: float | None) -> No
         note_thinking(view)
     elif kind == "agent_message":
         note_reply(view)
+        note_agent_text(view, message_text(payload))
     elif kind == "user_message":
         note_user(view, timestamp)
+        note_user_text(view, message_text(payload))
+    elif kind == "thread_goal_updated":
+        note_goal(view, payload)
 
 
 def apply_response_item(view: SessionView, payload: dict, timestamp: float | None) -> None:
@@ -455,8 +667,10 @@ def apply_response_item(view: SessionView, payload: dict, timestamp: float | Non
         role = payload.get("role")
         if role == "assistant":
             note_reply(view)
+            note_agent_text(view, message_text(payload))
         elif role == "user":
             note_user(view, timestamp)
+            note_user_text(view, message_text(payload))
 
 
 def begin_turn(view: SessionView, timestamp: float | None) -> None:
@@ -1047,6 +1261,7 @@ def build_payload(
         "stale": stale,
         "hook_fresh": hook_fresh,
         "footer": footer,
+        "summary": session_summary(merged),
         "message": None,
     }
 
@@ -1091,5 +1306,6 @@ def empty_payload(now: float, tz_offset_seconds: int | None = None, message: str
         "stale": False,
         "hook_fresh": False,
         "footer": "还没有会话",
+        "summary": None,
         "message": message,
     }
