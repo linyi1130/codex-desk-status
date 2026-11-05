@@ -753,16 +753,31 @@ def apply_response_item(view: SessionView, payload: dict, timestamp: float | Non
 
 
 _ACCOUNTING_GRACE_SECONDS = 2.0
+# Codex appends trailing cleanup records (``item_completed``, a final
+# ``message``, usage) for a few seconds after ``task_complete``. They belong
+# to the turn that just finished, not a new one, so ensure_turn ignores them
+# within this window.
+_REOPEN_GRACE_SECONDS = 5.0
 
 
 def ensure_turn(view: SessionView, timestamp: float | None) -> None:
     """Open a turn when work continues after task_complete.
 
-    A completion record is not the end of the file. Later tool items,
-    response items, and ``item_completed`` events belong to the next turn.
+    A completion record is not the end of the file: Codex appends trailing
+    cleanup records (``item_completed``, a final ``message``, usage) a few
+    seconds later. Those belong to the turn that just finished, so they are
+    ignored inside the reopen grace window. Genuine new turns open via
+    ``task_started`` / ``user_message``, which call ``begin_turn`` directly.
     """
-    if view.phase != "running":
-        begin_turn(view, timestamp)
+    if view.phase == "running":
+        return
+    if (
+        view.finished_at is not None
+        and timestamp is not None
+        and timestamp <= view.finished_at + _REOPEN_GRACE_SECONDS
+    ):
+        return
+    begin_turn(view, timestamp)
 
 
 def note_accounting(view: SessionView, timestamp: float | None) -> None:
