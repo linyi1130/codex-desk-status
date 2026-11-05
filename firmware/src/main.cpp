@@ -56,25 +56,55 @@ const DemoFrame kFrames[] = {
 
 uint8_t demoIndex = 0;
 uint32_t demoStamp = 0;
-bool buttonDown = false;
-// The wake press is still down when setup() runs. Ignore it until release.
-bool bootSeenRelease = false;
-uint32_t bootDownAt = 0;
+
+struct SleepKey {
+  int pin;
+  bool seenRelease;
+  uint32_t downAt;
+};
+
+SleepKey sleepKeys[] = {
+    {PIN_BUTTON_BOOT, false, 0},
+    {PIN_BUTTON_USER, false, 0},
+};
+
+bool anyKeyDown() {
+  for (const SleepKey& key : sleepKeys) {
+    if (digitalRead(key.pin) == LOW) return true;
+  }
+  return false;
+}
 
 bool consumeSleepPress() {
-  const bool down = digitalRead(PIN_BUTTON_BOOT) == LOW;
-  if (!bootSeenRelease) {
-    if (!down) bootSeenRelease = true;
-    return false;
-  }
   const uint32_t now = millis();
-  if (!down) {
-    const bool slept = bootDownAt != 0 && now - bootDownAt >= 40;
-    bootDownAt = 0;
-    return slept;
+  bool ready = false;
+  for (SleepKey& key : sleepKeys) {
+    const bool down = digitalRead(key.pin) == LOW;
+    if (!key.seenRelease) {
+      if (!down) key.seenRelease = true;
+      continue;
+    }
+    if (!down) {
+      if (key.downAt != 0 && now - key.downAt >= 40) ready = true;
+      key.downAt = 0;
+      continue;
+    }
+    if (key.downAt == 0) key.downAt = now;
   }
-  if (bootDownAt == 0) bootDownAt = now;
-  return false;
+  // Sleep only after the press is released, and only when both pins are high,
+  // so ext1 ANY_LOW does not wake in the same gesture.
+  return ready && !anyKeyDown();
+}
+
+void armEitherButtonWake() {
+  const gpio_num_t pins[] = {GPIO_NUM_0, GPIO_NUM_14};
+  for (gpio_num_t pin : pins) {
+    rtc_gpio_pullup_en(pin);
+    rtc_gpio_pulldown_dis(pin);
+  }
+  const uint64_t mask = (1ULL << GPIO_NUM_0) | (1ULL << GPIO_NUM_14);
+  // ESP32-S3 ext1: ANY_LOW wakes if either RTC pin goes low. ext0 can watch only one pin.
+  esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
 }
 
 void enterDeepSleep() {
@@ -85,11 +115,7 @@ void enterDeepSleep() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
   }
-  // Wake when BOOT is pressed (active low). The pin is high before we sleep,
-  // so a finger still on the key cannot immediately wake and sleep again.
-  rtc_gpio_pullup_en(GPIO_NUM_0);
-  rtc_gpio_pulldown_dis(GPIO_NUM_0);
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);
+  armEitherButtonWake();
   esp_deep_sleep_start();
 }
 
@@ -155,13 +181,6 @@ void showDemo(uint8_t index) {
   demoStamp = millis();
 }
 
-bool userPressed() {
-  const bool down = digitalRead(PIN_BUTTON_USER) == LOW;
-  const bool pressed = down && !buttonDown;
-  buttonDown = down;
-  return pressed;
-}
-
 }  // namespace
 
 void setup() {
@@ -169,7 +188,7 @@ void setup() {
   delay(50);
   pinMode(PIN_BUTTON_BOOT, INPUT_PULLUP);
   pinMode(PIN_BUTTON_USER, INPUT_PULLUP);
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT0) {
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1) {
     Serial.println("wake");
   }
   batteryBegin();
@@ -179,7 +198,7 @@ void setup() {
   uiBegin();
   Serial.printf("屏幕 %d x %d\n", 320, 170);
   if (DEMO_MODE) {
-    Serial.println("演示模式：侧键切换画面");
+    Serial.println("demo");
     showDemo(0);
     return;
   }
@@ -190,16 +209,15 @@ void loop() {
   if (consumeSleepPress()) {
     enterDeepSleep();
   }
-  const bool pressed = userPressed();
   if (DEMO_MODE) {
-    if (pressed || millis() - demoStamp > 4000) {
+    if (millis() - demoStamp > 4000) {
       demoIndex = static_cast<uint8_t>((demoIndex + 1) % (sizeof(kFrames) / sizeof(kFrames[0])));
       showDemo(demoIndex);
     }
     delay(20);
     return;
   }
-  const bool fetched = netLoop(pressed);
+  const bool fetched = netLoop(false);
   static uint32_t lastBattery = 0;
   const uint32_t now = millis();
   bool batteryChanged = false;
@@ -218,7 +236,7 @@ void loop() {
   if (fetched || batteryChanged || uiMinuteChanged()) {
     uiPaint(false);
   }
-  // The radio stays idle here. Sample BOOT often enough to catch a short press.
+  // The radio stays idle here. Sample both case buttons often enough for a short press.
   for (uint32_t waited = 0; waited < 250; waited += 20) {
     if (consumeSleepPress()) enterDeepSleep();
     delay(20);
