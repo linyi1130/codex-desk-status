@@ -5,11 +5,19 @@ The ESP32 build does not need the .otf. Re-run this if on-screen copy changes:
 
     FONT_PATH=/tmp/fonts/NotoSansSC-Regular.otf python3 firmware/scripts/gen_font.py
 
-Characters are harvested from host/, hooks/, firmware/src, and firmware/include,
-plus TITLE_SEED below. Sidebar titles arrive at runtime from
-~/.codex/session_index.jsonl and are not in those trees. Do not read that
-file into this generator: it would bake private thread names into the repo.
-Extend TITLE_SEED when a new title needs glyphs that are still missing.
+Characters come from three places:
+
+- host/, hooks/, firmware/src, and firmware/include (the on-screen UI copy)
+- TITLE_SEED below (the known sidebar title, plus a few task-title words)
+- common_han_3500.txt, the 1988 现代汉语常用字表 (2500 + 1000)
+
+Sidebar titles arrive at runtime from ~/.codex/session_index.jsonl and are not
+in the source tree. Do not read that file into this generator: it would bake
+private thread names into the repo. The common-character table covers almost
+all of those titles, including 查明 10 处模型跳变. A genuinely rare character
+can still be added to TITLE_SEED, then regenerate:
+
+    FONT_PATH=/tmp/fonts/NotoSansSC-Regular.otf python3 firmware/scripts/gen_font.py
 """
 
 from __future__ import annotations
@@ -21,8 +29,10 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve().parent
 OUT_H = ROOT / "firmware" / "src" / "font_zh.h"
 OUT_CPP = ROOT / "firmware" / "src" / "font_zh.cpp"
+COMMON_HAN = HERE / "common_han_3500.txt"
 SCALE = 3
 
 CANDIDATES = [
@@ -71,6 +81,11 @@ def collect_codepoints() -> list[int]:
     chars.add(0xFF08)  # （
     chars.add(0xFF09)  # ）
     for char in TITLE_SEED:
+        if ord(char) > 127:
+            chars.add(ord(char))
+    if not COMMON_HAN.is_file():
+        raise SystemExit(f"缺少常用字表 {COMMON_HAN}")
+    for char in COMMON_HAN.read_text(encoding="utf-8"):
         if ord(char) > 127:
             chars.add(ord(char))
     roots = [

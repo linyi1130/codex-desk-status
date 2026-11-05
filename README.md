@@ -212,7 +212,7 @@ pio device monitor
 | 额度一直是空的 | 有的会话把 `rate_limits` 写成 `null`。再跑一轮，或看别的最近会话里有没有百分比。已压缩的 `.jsonl.zst` 不读 |
 | 浏览器打得开，板子不行 | 板子和 Mac 是否同一网段；macOS 是否允许 Python 的本地网络；`SIDECAR_URL` 是否写成 Mac 的局域网 IP，并且带 `/status` |
 | 屏幕全黑 | 先确认烧的是这块经典 T-Display-S3。固件会在初始化前把 GPIO15 拉高给屏幕供电 |
-| 中文是方块 | 不要换回 TFT 自带的拉丁字体。字形在 `firmware/src/font_zh.cpp`，改了界面文案后运行 `python3 firmware/scripts/gen_font.py`（需要本机有 Noto Sans SC 或 `FONT_PATH`） |
+| 中文是方块 | 不要换回 TFT 自带的拉丁字体。字形在 `firmware/src/font_zh.cpp`。字库含界面文案、`TITLE_SEED`，以及《现代汉语常用字表》3500 字（`firmware/scripts/common_han_3500.txt`）。侧边栏标题不在源码里，所以靠这张常用字表来画。表外的生僻字加进 `firmware/scripts/gen_font.py` 的 `TITLE_SEED`，然后运行 `FONT_PATH=/tmp/fonts/NotoSansSC-Regular.otf python3 firmware/scripts/gen_font.py`。不要把 `~/.codex/session_index.jsonl` 读进字库 |
 | 一轮停在「执行中」很久 | 会话文件超过 30 分钟没有新写入时，标签会回到「等待中」，避免一个已经退出的进程一直转 |
 
 ## 测试
