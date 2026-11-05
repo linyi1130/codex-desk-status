@@ -124,6 +124,7 @@ class SessionView:
     context_limit: int | None = None
     turn_started_at: float | None = None
     turn_ended_at: float | None = None
+    finished_at: float | None = None
     last_event_at: float | None = None
     rate_limit_reached: bool = False
     quota_event_at: float | None = None
@@ -225,6 +226,7 @@ def apply_line(view: SessionView, line: str) -> None:
         apply_cwd(view, payload.get("cwd"))
         return
     if record_type == "token_usage_record":
+        note_accounting(view, timestamp)
         apply_usage_blob(view, payload, timestamp)
         return
     if record_type == "event_msg":
@@ -386,7 +388,9 @@ def read_session_head(path: Path) -> SessionView:
             if not raw:
                 break
             if len(raw) >= _HEAD_LINE_CAP and not raw.endswith((b"\n", b"\r")):
-                view.child_rollout = True
+                # The first line is still being written, or it is larger than
+                # we will buffer. Do not guess that this is a sub-agent: a
+                # wrong child flag would hide a new user chat until restart.
                 return view
             line = raw.decode("utf-8", "replace").strip()
             if not line:
@@ -695,7 +699,10 @@ def apply_event(view: SessionView, payload: dict, timestamp: float | None) -> No
     elif kind in ABORT_EVENTS:
         finish_turn(view, timestamp, payload, interrupted=True)
     elif kind == "token_count":
+        note_accounting(view, timestamp)
         apply_token_count(view, payload, timestamp)
+    elif kind in {"item_completed", "item_started"}:
+        ensure_turn(view, timestamp)
     elif kind in TOOL_BEGIN:
         open_tool(view, call_id(payload) or fresh_id(view), TOOL_BEGIN[kind], timestamp)
     elif kind in TOOL_END:
@@ -714,6 +721,8 @@ def apply_event(view: SessionView, payload: dict, timestamp: float | None) -> No
 
 def apply_response_item(view: SessionView, payload: dict, timestamp: float | None) -> None:
     kind = str(payload.get("type") or "")
+    if kind:
+        ensure_turn(view, timestamp)
     name = payload.get("name") if isinstance(payload.get("name"), str) else ""
     status = str(payload.get("status") or "").lower()
     identifier = call_id(payload)
@@ -740,11 +749,41 @@ def apply_response_item(view: SessionView, payload: dict, timestamp: float | Non
             note_user_text(view, message_text(payload))
 
 
+_ACCOUNTING_GRACE_SECONDS = 2.0
+
+
+def ensure_turn(view: SessionView, timestamp: float | None) -> None:
+    """Open a turn when work continues after task_complete.
+
+    A completion record is not the end of the file. Later tool items,
+    response items, and ``item_completed`` events belong to the next turn.
+    """
+    if view.phase != "running":
+        begin_turn(view, timestamp)
+
+
+def note_accounting(view: SessionView, timestamp: float | None) -> None:
+    """Usage lines often follow ``task_complete`` for the turn that just ended.
+
+    Those do not start another turn. A usage record that arrives later does.
+    """
+    if view.phase not in {"complete", "interrupted"}:
+        return
+    if (
+        view.finished_at is not None
+        and timestamp is not None
+        and timestamp <= view.finished_at + _ACCOUNTING_GRACE_SECONDS
+    ):
+        return
+    ensure_turn(view, timestamp)
+
+
 def begin_turn(view: SessionView, timestamp: float | None) -> None:
     view.phase = "running"
     view.detail = "思考中"
     view.turn_started_at = timestamp if timestamp is not None else view.turn_started_at
     view.turn_ended_at = None
+    view.finished_at = None
     view.open_calls.clear()
 
 
@@ -757,6 +796,8 @@ def finish_turn(view: SessionView, timestamp: float | None, payload: dict, inter
     view.phase = "interrupted" if interrupted else "complete"
     view.detail = ""
     view.open_calls.clear()
+    if timestamp is not None:
+        view.finished_at = timestamp
 
 
 def note_user(view: SessionView, timestamp: float | None) -> None:

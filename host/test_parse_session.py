@@ -606,9 +606,13 @@ class MainWindowSelectionTest(unittest.TestCase):
                 self.assertEqual(held["color"], color)
                 self.assertEqual(held["context_used_tokens"], 218000)
                 self.assertEqual(held["weekly_used_percent"], 22)
-                self.assertEqual(held["page_count"], 1)
+                self.assertEqual(held["page_count"], 2)
                 if status == "complete":
                     self.assertEqual(held["turn_elapsed_text"], "3分0秒")
+                child_live = engine.payload(home, NOW + PAGE_DWELL_SECONDS, TZ, None)
+                self.assertEqual(child_live["session_id"], "child")
+                self.assertEqual(child_live["status"], "running")
+                self.assertEqual(child_live["page_count"], 2)
                 still = engine.payload(home, NOW + 1 + COMPLETION_HOLD_SECONDS - 1, TZ, None)
                 self.assertEqual(still["label"], label)
                 self.assertEqual(still["context_used_tokens"], 218000)
@@ -1212,6 +1216,129 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(child["window_name"], "请查桌面状态")
             self.assertEqual(child["summary"], "fix battery")
             self.assertNotEqual(child["window_name"], child["summary"])
+
+
+class LiveTurnTest(unittest.TestCase):
+    def test_newer_user_chat_is_chosen_without_restarting_engine(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".codex"
+            day = root / "sessions" / "2026" / "11" / "06"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-old.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "old-chat", "thread_source": "user", "cwd": "/work/Old", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:20:00Z"),
+                        _line("event_msg", {"type": "task_complete", "duration_ms": 1000}, "2026-11-05T00:21:00Z"),
+                    ]
+                ),
+                NOW - 100,
+            )
+            engine = Engine()
+            first = engine.payload(root, NOW, TZ, None)
+            self.assertEqual(first["session_id"], "old-chat")
+            self.assertEqual(first["status"], "complete")
+            new_path = day / "rollout-new.jsonl"
+            new_path.write_bytes(
+                b'{"timestamp":"2026-11-06T01:26:37Z","type":"session_meta","payload":{"id":"child-looking","parent_thread_id":"someone","thread_source":"subagent"}'
+            )
+            os.utime(new_path, (NOW + 1, NOW + 1))
+            skipped = engine.payload(root, NOW + 1, TZ, None)
+            self.assertEqual(skipped["session_id"], "old-chat")
+            new_path.write_text(
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {"id": "new-chat", "thread_source": "user", "cwd": "/work/New", "source": "cli"},
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-06T01:26:40Z"),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            os.utime(new_path, (NOW + 2, NOW + 2))
+            live = engine.payload(root, NOW + 2, TZ, None)
+            self.assertEqual(live["session_id"], "new-chat")
+            self.assertEqual(live["status"], "running")
+            self.assertEqual(live["project_name"], "New")
+
+    def test_task_complete_then_more_work_is_running_again(self) -> None:
+        text = "\n".join(
+            [
+                _line("session_meta", {"id": "s", "cwd": "/work/App", "source": "cli"}),
+                _line("event_msg", {"type": "task_started"}, "2026-11-06T01:26:00Z"),
+                _line("event_msg", {"type": "task_complete", "duration_ms": 1000}, "2026-11-06T01:26:01Z"),
+                _line("event_msg", {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 10}}}, "2026-11-06T01:26:01.200Z"),
+                _line("event_msg", {"type": "item_completed"}, "2026-11-06T01:27:00Z"),
+                _line("response_item", {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "still working"}]}, "2026-11-06T01:27:05Z"),
+                _line("event_msg", {"type": "token_count", "info": {"last_token_usage": {"total_tokens": 20}}}, "2026-11-06T01:28:00Z"),
+            ]
+        )
+        mid = parse_jsonl(text)
+        self.assertEqual(mid.phase, "running")
+        done = parse_jsonl(
+            text + "\n" + _line("event_msg", {"type": "task_complete", "duration_ms": 5000}, "2026-11-06T01:29:28Z")
+        )
+        self.assertEqual(done.phase, "complete")
+        payload = parse_session.build_payload(done, NOW, tz_offset_seconds=TZ, session_file="a.jsonl", file_mtime=NOW)
+        self.assertEqual(payload["status"], "complete")
+        self.assertNotIn("still working", json.dumps(payload, ensure_ascii=False))
+
+    def test_parent_complete_still_serves_a_running_child(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".codex"
+            day = root / "sessions" / "2026" / "11" / "06"
+            day.mkdir(parents=True)
+            _write(
+                day,
+                "rollout-parent.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "parent", "thread_source": "user", "cwd": "/work/App", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-06T01:26:40Z"),
+                        _line("event_msg", {"type": "task_complete", "duration_ms": 154527}, "2026-11-06T01:29:12Z"),
+                        _tokens(218000, "2026-11-06T01:29:12.200Z", weekly=22),
+                    ]
+                ),
+                NOW - 5,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {
+                                "id": "child",
+                                "session_id": "parent",
+                                "parent_thread_id": "parent",
+                                "thread_source": "subagent",
+                                "agent_path": "coverage_impl",
+                            },
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-06T01:27:31Z"),
+                        _line("event_msg", {"type": "item_completed"}, "2026-11-06T01:29:20Z"),
+                        _tokens(410000, "2026-11-06T01:29:28Z"),
+                    ]
+                ),
+                NOW,
+            )
+            engine = Engine()
+            page = engine.payload(root, NOW, TZ, None)
+            self.assertEqual(page["session_id"], "child")
+            self.assertEqual(page["status"], "running")
+            self.assertEqual(page["summary"], "coverage impl")
+            self.assertEqual(page["context_used_tokens"], 410000)
+            self.assertNotEqual(page["label"], "已完成")
 
 
 class FontCoverageTest(unittest.TestCase):

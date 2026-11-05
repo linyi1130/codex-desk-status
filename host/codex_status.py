@@ -267,8 +267,10 @@ class Engine:
                 running.append(page)
         running.sort(key=lambda page: page_sort_key(page, focus_payload.get("session_id")))
         self.note_focus(now, focus_payload)
-        if self.holding(now, focus_payload):
-            return stamp_page(focus_payload, 1, 1)
+        if self.holding(now, focus_payload) and focus_payload.get("status") != "running":
+            focus_id = focus_payload.get("session_id")
+            if not any(page.get("session_id") == focus_id for page in running):
+                running.insert(0, focus_payload)
         if not running:
             self.rotation_ids = None
             self.rotation_anchor = None
@@ -296,10 +298,14 @@ class Engine:
         """
         for path in files:
             try:
-                if not is_child_session(self.head(path)):
-                    return path
+                view = self.head(path)
             except OSError as exc:
                 log(f"跳过 {path.name}: {exc}")
+                continue
+            if not view.session_id:
+                continue
+            if not is_child_session(view):
+                return path
         return files[0]
 
     def fresh_views(
@@ -442,15 +448,18 @@ class Engine:
     def head(self, path: Path) -> SessionView:
         stat = path.stat()
         key = str(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
         found = self.heads.get(key)
-        # The leading session_meta record is stable while the file grows.
-        if found and stat.st_size >= found[0]:
+        # Re-read when the file grows. A first look can land mid-write, before
+        # session_meta is a full line; keeping that guess hid new user chats
+        # until the process restarted.
+        if found and found[0] == signature:
             return found[1]
         view = read_session_head(path)
-        self.heads[key] = (stat.st_size, view)
+        self.heads[key] = (signature, view)
         if len(self.heads) > 512:
             self.heads.clear()
-            self.heads[key] = (stat.st_size, view)
+            self.heads[key] = (signature, view)
         return view
 
     def cached(self, path: Path) -> SessionView:
