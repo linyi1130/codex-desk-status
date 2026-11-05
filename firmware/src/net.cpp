@@ -16,32 +16,32 @@
 #error "Copy firmware/include/config.example.h to firmware/include/config.h before building."
 #endif
 
-// A local config.h copied from an older example still defines a 2s poll.
-// This desk only needs to see whether the main chat has finished.
-#undef STATUS_POLL_MS
-#define STATUS_POLL_MS 12000
-#undef STATUS_POLL_IDLE_MS
-#define STATUS_POLL_IDLE_MS 30000
-
 namespace {
 
+// The desk does not poll. If the event stream drops, wait this long, then
+// try again, and fetch /status once so the screen is not stuck.
+constexpr uint32_t kReconnectMs = 20000;
+constexpr uint32_t kReconnectMaxMs = 60000;
+constexpr uint32_t kWifiRetryMs = 30000;
+constexpr size_t kAccumMax = 3072;
+
+char sidecarHost[64] = "";
+uint16_t sidecarPort = SIDECAR_PORT;
 char sidecarUrl[160] = SIDECAR_URL;
-uint32_t lastPoll = 0;
-uint32_t lastDiscover = 0;
+WiFiClient stream;
+bool streamLive = false;
+bool headersDone = false;
 bool urlFromMdns = false;
 bool mdnsReady = false;
+uint32_t lastAttempt = 0;
+uint32_t reconnectMs = kReconnectMs;
+char accum[kAccumMax];
+size_t accumLen = 0;
 
 void enableModemSleep() {
   // WIFI_PS_MIN_MODEM is the same mode as WiFi.setSleep(true): beacon
   // wakeups only, association kept. WIFI_PS_MAX_MODEM is not used.
   WiFi.setSleep(WIFI_PS_MIN_MODEM);
-}
-
-uint32_t pollIntervalMs() {
-  if (gState.link == LINK_OK && strcmp(gState.status, "running") == 0) {
-    return STATUS_POLL_MS;
-  }
-  return STATUS_POLL_IDLE_MS;
 }
 
 void copyText(char* dest, size_t size, const char* value) {
@@ -53,33 +53,62 @@ void markLost() {
   gState.link = gState.everSynced ? LINK_STALE : LINK_DOWN;
 }
 
+void rememberHost(const char* host, uint16_t port) {
+  strlcpy(sidecarHost, host, sizeof(sidecarHost));
+  sidecarPort = port == 0 ? SIDECAR_PORT : port;
+  snprintf(sidecarUrl, sizeof(sidecarUrl), "http://%s:%u/status", sidecarHost, static_cast<unsigned>(sidecarPort));
+}
+
+bool parseFallbackUrl() {
+  const char* text = SIDECAR_URL;
+  if (strncmp(text, "http://", 7) == 0) text += 7;
+  const char* slash = strchr(text, '/');
+  const char* colon = strchr(text, ':');
+  char host[64];
+  uint16_t port = 80;
+  if (colon && (slash == nullptr || colon < slash)) {
+    size_t length = static_cast<size_t>(colon - text);
+    if (length >= sizeof(host)) length = sizeof(host) - 1;
+    memcpy(host, text, length);
+    host[length] = '\0';
+    port = static_cast<uint16_t>(atoi(colon + 1));
+  } else {
+    size_t length = slash ? static_cast<size_t>(slash - text) : strlen(text);
+    if (length >= sizeof(host)) length = sizeof(host) - 1;
+    memcpy(host, text, length);
+    host[length] = '\0';
+  }
+  if (!host[0]) return false;
+  rememberHost(host, port);
+  return true;
+}
+
 bool discover() {
   if (!mdnsReady) {
     mdnsReady = MDNS.begin("codex-desk");
     if (!mdnsReady) {
       Serial.println("mDNS 启动失败，改用备用地址");
-      return false;
+      urlFromMdns = false;
+      return parseFallbackUrl();
     }
   }
   IPAddress host = MDNS.queryHost(MDNS_HOST, 2000);
   if (host != IPAddress(0, 0, 0, 0)) {
-    snprintf(sidecarUrl, sizeof(sidecarUrl), "http://%s:%d/status", host.toString().c_str(), SIDECAR_PORT);
+    rememberHost(host.toString().c_str(), SIDECAR_PORT);
     urlFromMdns = true;
-    Serial.printf("mDNS %s -> %s\n", MDNS_HOST, sidecarUrl);
+    Serial.printf("mDNS %s -> %s\n", MDNS_HOST, sidecarHost);
     return true;
   }
   const int found = MDNS.queryService("codexstatus", "tcp");
   if (found > 0) {
-    snprintf(sidecarUrl, sizeof(sidecarUrl), "http://%s:%u/status", MDNS.IP(0).toString().c_str(),
-             static_cast<unsigned>(MDNS.port(0)));
+    rememberHost(MDNS.IP(0).toString().c_str(), static_cast<uint16_t>(MDNS.port(0)));
     urlFromMdns = true;
-    Serial.printf("mDNS service -> %s\n", sidecarUrl);
+    Serial.printf("mDNS service -> %s:%u\n", sidecarHost, static_cast<unsigned>(sidecarPort));
     return true;
   }
   Serial.printf("mDNS 未找到 %s.local，使用备用地址\n", MDNS_HOST);
-  strlcpy(sidecarUrl, SIDECAR_URL, sizeof(sidecarUrl));
   urlFromMdns = false;
-  return false;
+  return parseFallbackUrl();
 }
 
 void applyJson(const String& body) {
@@ -137,7 +166,7 @@ void applyJson(const String& body) {
 }
 
 bool poll() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() != WL_CONNECTED || !sidecarHost[0]) {
     gState.link = LINK_WIFI;
     return false;
   }
@@ -160,6 +189,120 @@ bool poll() {
   return false;
 }
 
+void dropStream() {
+  streamLive = false;
+  headersDone = false;
+  accumLen = 0;
+  stream.stop();
+}
+
+bool connectStream() {
+  dropStream();
+  if (!sidecarHost[0]) return false;
+  stream.setTimeout(3000);
+  if (!stream.connect(sidecarHost, sidecarPort, 3000)) {
+    Serial.printf("推送连接失败 %s:%u\n", sidecarHost, static_cast<unsigned>(sidecarPort));
+    return false;
+  }
+  stream.setNoDelay(true);
+  stream.print("GET /events HTTP/1.1\r\nHost: ");
+  stream.print(sidecarHost);
+  stream.print("\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n");
+  streamLive = true;
+  enableModemSleep();
+  Serial.printf("推送 %s:%u/events\n", sidecarHost, static_cast<unsigned>(sidecarPort));
+  return true;
+}
+
+bool consumeEvents() {
+  bool applied = false;
+  while (true) {
+    if (!headersDone) {
+      char* end = strstr(accum, "\r\n\r\n");
+      if (!end) return applied;
+      *end = '\0';
+      const bool ok = strstr(accum, " 200 ") != nullptr || strncmp(accum, "HTTP/1.1 200", 12) == 0 ||
+                      strncmp(accum, "HTTP/1.0 200", 12) == 0;
+      const size_t used = static_cast<size_t>(end + 4 - accum);
+      const size_t rest = accumLen - used;
+      memmove(accum, end + 4, rest);
+      accumLen = rest;
+      accum[accumLen] = '\0';
+      headersDone = true;
+      if (!ok) {
+        Serial.println("推送握手失败");
+        dropStream();
+        return applied;
+      }
+    }
+    char* gap = strstr(accum, "\n\n");
+    if (!gap) return applied;
+    *gap = '\0';
+    char* line = accum;
+    while (line && *line) {
+      char* nl = strchr(line, '\n');
+      if (nl) *nl = '\0';
+      if (*line == '\r') {
+        // blank
+      } else if (*line == ':') {
+        // keepalive comment; do not redraw
+      } else if (strncmp(line, "data:", 5) == 0) {
+        const char* json = line + 5;
+        if (*json == ' ') json++;
+        applyJson(String(json));
+        applied = true;
+      }
+      line = nl ? nl + 1 : nullptr;
+    }
+    const size_t used = static_cast<size_t>(gap + 2 - accum);
+    const size_t rest = accumLen - used;
+    memmove(accum, gap + 2, rest);
+    accumLen = rest;
+    accum[accumLen] = '\0';
+  }
+}
+
+bool pumpStream() {
+  if (!streamLive) return false;
+  while (stream.available() > 0 && accumLen + 1 < kAccumMax) {
+    accum[accumLen++] = static_cast<char>(stream.read());
+    accum[accumLen] = '\0';
+  }
+  if (accumLen + 1 >= kAccumMax) {
+    Serial.println("推送缓冲溢出");
+    dropStream();
+    markLost();
+    return false;
+  }
+  const bool applied = consumeEvents();
+  if (streamLive && !stream.connected() && stream.available() == 0) {
+    Serial.println("推送断开");
+    dropStream();
+    markLost();
+  }
+  return applied;
+}
+
+bool openOrFetch(bool allowFetch) {
+  if (!urlFromMdns && !sidecarHost[0]) discover();
+  if (connectStream()) {
+    reconnectMs = kReconnectMs;
+    return false;
+  }
+  if (urlFromMdns) {
+    urlFromMdns = false;
+    parseFallbackUrl();
+    if (connectStream()) {
+      reconnectMs = kReconnectMs;
+      return false;
+    }
+  }
+  reconnectMs = reconnectMs * 2;
+  if (reconnectMs > kReconnectMaxMs) reconnectMs = kReconnectMaxMs;
+  if (!allowFetch) return false;
+  return poll();
+}
+
 }  // namespace
 
 void netBegin() {
@@ -180,7 +323,7 @@ void netBegin() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("无线网络未连接");
     gState.link = LINK_WIFI;
-    lastPoll = millis();
+    lastAttempt = millis();
     uiPaint(false);
     return;
   }
@@ -190,9 +333,13 @@ void netBegin() {
   copyText(gState.label, sizeof(gState.label), "正在查找电脑");
   uiPaint(false);
   discover();
-  poll();
-  lastPoll = millis();
-  lastDiscover = lastPoll;
+  openOrFetch(true);
+  lastAttempt = millis();
+  const uint32_t until = millis() + 2500;
+  while (streamLive && millis() < until) {
+    if (pumpStream()) break;
+    delay(20);
+  }
   uiPaint(false);
 }
 
@@ -201,13 +348,14 @@ bool netLoop(bool force) {
   static bool modemSleepOn = false;
   if (WiFi.status() != WL_CONNECTED) {
     modemSleepOn = false;
+    dropStream();
     const bool changed = gState.link != LINK_WIFI;
     gState.link = LINK_WIFI;
-    if (now - lastPoll > STATUS_POLL_IDLE_MS) {
+    if (now - lastAttempt > kWifiRetryMs) {
       Serial.println("重试无线网络");
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-      lastPoll = now;
+      lastAttempt = now;
       return true;
     }
     return changed;
@@ -216,17 +364,13 @@ bool netLoop(bool force) {
     enableModemSleep();
     modemSleepOn = true;
   }
-  if (!urlFromMdns && (force || now - lastDiscover > 30000)) {
-    discover();
-    lastDiscover = now;
+  if (streamLive) {
+    return pumpStream();
   }
-  if (force || now - lastPoll >= pollIntervalMs()) {
-    const bool ok = poll();
-    lastPoll = now;
-    if (!ok && urlFromMdns) {
-      urlFromMdns = false;
-    }
-    return true;
+  if (force || now - lastAttempt >= reconnectMs) {
+    lastAttempt = now;
+    if (!sidecarHost[0]) discover();
+    return openOrFetch(true);
   }
   return false;
 }

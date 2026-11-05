@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import signal
 import socket
@@ -50,6 +51,19 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_MDNS = "codex-status"
 DONOR_LIMIT = 8
 MAX_FRESH_PARSES = 24
+# Quota and context may move while a turn is in progress. The desk does not
+# need those more than once every few minutes.
+INTERMEDIATE_PUSH_SECONDS = 240.0
+EDGE_STATUSES = {"running", "complete", "interrupted"}
+SLOW_PUSH_KEYS = (
+    "weekly_used_percent",
+    "five_hour_used_percent",
+    "context_used_tokens",
+    "context_limit_tokens",
+    "summary",
+    "window_name",
+    "plan_name",
+)
 
 
 def log(message: str) -> None:
@@ -435,6 +449,75 @@ def client_is_local(ip: str) -> bool:
     return ip in {"127.0.0.1", "::1"}
 
 
+def decide_push(
+    previous: dict | None,
+    current: dict,
+    now: float,
+    last_sent_at: float | None,
+) -> str | None:
+    """Whether the desk should get ``current`` now.
+
+    ``running``, ``complete``, and ``interrupted`` on the main chat are
+    sent immediately, including a switch to another chatting window.
+    Tool-label churn stays quiet. Quota and context wait
+    ``INTERMEDIATE_PUSH_SECONDS``.
+    """
+    if previous is None:
+        return "connect"
+    if current.get("session_id") != previous.get("session_id"):
+        return "focus"
+    status = current.get("status")
+    prev_status = previous.get("status")
+    if status != prev_status and (status in EDGE_STATUSES or prev_status in EDGE_STATUSES):
+        return "edge"
+    if last_sent_at is None or now - last_sent_at < INTERMEDIATE_PUSH_SECONDS:
+        return None
+    if any(previous.get(key) != current.get(key) for key in SLOW_PUSH_KEYS):
+        return "intermediate"
+    return None
+
+
+def sse_bytes(payload: dict) -> bytes:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return f"data: {body}\n\n".encode("utf-8")
+
+
+class PushGate:
+    def __init__(self) -> None:
+        self.last_sent: dict | None = None
+        self.last_sent_at: float | None = None
+
+    def consider(self, payload: dict, now: float) -> str | None:
+        reason = decide_push(self.last_sent, payload, now, self.last_sent_at)
+        if reason is None:
+            return None
+        self.last_sent = dict(payload)
+        self.last_sent_at = now
+        return reason
+
+
+class StreamClient:
+    def __init__(self) -> None:
+        self.queue: queue.Queue[bytes] = queue.Queue(maxsize=4)
+
+    def offer(self, blob: bytes) -> None:
+        if self.queue.full():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                pass
+        try:
+            self.queue.put_nowait(blob)
+        except queue.Full:
+            pass
+
+    def wait(self, timeout: float) -> bytes | None:
+        try:
+            return self.queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
 class Service:
     def __init__(self, codex_home: Path, tz_offset: int | None) -> None:
         self.codex_home = codex_home
@@ -444,6 +527,20 @@ class Service:
         self.hook: HookHint | None = None
         self.payload: dict = empty_payload(time.time(), tz_offset)
         self.wake = threading.Event()
+        self.stopping = threading.Event()
+        self.gate = PushGate()
+        self.subscribers: list[StreamClient] = []
+
+    def subscribe(self) -> StreamClient:
+        client = StreamClient()
+        with self.lock:
+            self.subscribers.append(client)
+        return client
+
+    def unsubscribe(self, client: StreamClient) -> None:
+        with self.lock:
+            if client in self.subscribers:
+                self.subscribers.remove(client)
 
     def publish(self) -> dict:
         with self.lock:
@@ -452,6 +549,12 @@ class Service:
         payload = self.engine.payload(self.codex_home, time.time(), tz, hook)
         with self.lock:
             self.payload = payload
+            reason = self.gate.consider(payload, time.time())
+            subscribers = list(self.subscribers) if reason else []
+        if reason:
+            blob = sse_bytes(payload)
+            for subscriber in subscribers:
+                subscriber.offer(blob)
         return payload
 
     def snapshot(self) -> dict:
@@ -501,7 +604,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <main>
   <h1>Codex 桌面状态</h1>
   <div class="screen" id="screen"></div>
-  <p class="note">开发板轮询的是 <code>/status</code>。本页只是本机核对用。</p>
+  <p class="note">开发板守着 <code>/events</code>，只在主会话开始或结束时收到推送。本页仍轮询 <code>/status</code>。</p>
   <pre id="raw"></pre>
 </main>
 <script>
@@ -553,9 +656,13 @@ setInterval(tick, 2000);
 
 class Handler(BaseHTTPRequestHandler):
     service: Service
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/events":
+            self._stream_events()
+            return
         if path in {"/status", "/status.json", "/api/status"}:
             self._send(200, self.service.snapshot(), "application/json; charset=utf-8")
         elif path == "/health":
@@ -597,6 +704,41 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         log("http " + (fmt % args))
+
+    def _stream_events(self) -> None:
+        subscriber = self.service.subscribe()
+        self.close_connection = False
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self._write_stream(sse_bytes(self.service.snapshot()))
+            last_write = time.time()
+            while not self.service.stopping.is_set():
+                item = subscriber.wait(1.0)
+                now = time.time()
+                if item is not None:
+                    self._write_stream(item)
+                    last_write = now
+                elif now - last_write >= INTERMEDIATE_PUSH_SECONDS:
+                    # Keep the NAT mapping alive without redrawing the desk.
+                    self._write_stream(b": ping\n\n")
+                    last_write = now
+        except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
+            pass
+        finally:
+            self.service.unsubscribe(subscriber)
+            self.close_connection = True
+
+    def _write_stream(self, blob: bytes) -> None:
+        self.wfile.write(blob)
+        self.wfile.flush()
 
     def _send(self, code: int, payload: dict, content_type: str) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -652,6 +794,7 @@ def serve(codex_home: Path, host: str, port: int, mdns_name: str, poll_seconds: 
     actual_port = server.server_address[1]
     log(f"读取  {codex_home / 'sessions'}")
     log(f"监听  http://{host}:{actual_port}/status")
+    log(f"推送  http://{host}:{actual_port}/events")
     log(f"本机  http://127.0.0.1:{actual_port}/")
     if ip != "127.0.0.1":
         log(f"局域网 http://{ip}:{actual_port}/status")
@@ -683,6 +826,7 @@ def serve(codex_home: Path, host: str, port: int, mdns_name: str, poll_seconds: 
         while not stop.is_set():
             stop.wait(0.5)
     finally:
+        service.stopping.set()
         server.shutdown()
         if mdns is not None and mdns.poll() is None:
             mdns.terminate()

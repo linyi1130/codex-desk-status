@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from http.client import HTTPConnection
@@ -13,8 +15,10 @@ from pathlib import Path
 import codex_status
 import parse_session
 from codex_status import (
+    INTERMEDIATE_PUSH_SECONDS,
     Engine,
     Handler,
+    PushGate,
     Service,
     client_is_local,
     load_thread_titles,
@@ -1326,6 +1330,186 @@ class LiveTurnTest(unittest.TestCase):
             self.assertEqual(later["status"], "complete")
             self.assertEqual(later["page_count"], 1)
             self.assertNotIn("coverage impl", json.dumps(later, ensure_ascii=False))
+
+
+def _desk_payload(**overrides: object) -> dict:
+    payload = {
+        "status": "complete",
+        "session_id": "main",
+        "label": "已完成",
+        "weekly_used_percent": 10,
+        "five_hour_used_percent": None,
+        "context_used_tokens": 1000,
+        "context_limit_tokens": 200000,
+        "summary": "请看一下",
+        "window_name": "主窗口",
+        "plan_name": "Pro",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _read_sse(sock: socket.socket, state: dict, timeout: float) -> bytes | None:
+    pending: bytearray = state["buf"]
+    deadline = time.time() + timeout
+    sock.settimeout(0.2)
+    while time.time() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            chunk = b""
+        if chunk:
+            pending.extend(chunk)
+        if not state["headers"]:
+            split_at = pending.find(b"\r\n\r\n")
+            if split_at < 0:
+                continue
+            del pending[: split_at + 4]
+            state["headers"] = True
+        mark = pending.find(b"\n\n")
+        if mark >= 0:
+            event = bytes(pending[:mark])
+            del pending[: mark + 2]
+            return event
+    return None
+
+
+class PushTest(unittest.TestCase):
+    def test_start_complete_and_interrupted_push_immediately(self) -> None:
+        gate = PushGate()
+        self.assertEqual(gate.consider(_desk_payload(), 0), "connect")
+        started = _desk_payload(status="running", label="执行中 · 思考中")
+        self.assertEqual(gate.consider(started, 1), "edge")
+        self.assertIsNone(gate.consider(_desk_payload(status="running", label="执行中 · 跑命令"), 2))
+        self.assertIsNone(gate.consider(_desk_payload(status="running", label="执行中 · 回复中"), 3))
+        self.assertEqual(gate.consider(_desk_payload(status="complete", label="已完成"), 4), "edge")
+        self.assertEqual(gate.consider(_desk_payload(status="running", label="执行中 · 思考中"), 5), "edge")
+        self.assertEqual(gate.consider(_desk_payload(status="interrupted", label="已中断"), 6), "edge")
+
+    def test_intermediate_quota_is_rate_limited(self) -> None:
+        gate = PushGate()
+        base = _desk_payload(status="running", label="执行中 · 思考中")
+        self.assertEqual(gate.consider(base, 0), "connect")
+        richer = _desk_payload(status="running", label="执行中 · 思考中", context_used_tokens=5000, weekly_used_percent=18)
+        self.assertIsNone(gate.consider(richer, INTERMEDIATE_PUSH_SECONDS - 1))
+        self.assertEqual(gate.consider(richer, INTERMEDIATE_PUSH_SECONDS), "intermediate")
+        self.assertIsNone(gate.consider(richer, INTERMEDIATE_PUSH_SECONDS + 10))
+        churn = _desk_payload(status="running", label="执行中 · 跑命令", context_used_tokens=5000, weekly_used_percent=18)
+        self.assertIsNone(gate.consider(churn, INTERMEDIATE_PUSH_SECONDS * 2))
+
+    def test_new_main_chat_is_pushed_without_a_new_gate(self) -> None:
+        gate = PushGate()
+        gate.consider(_desk_payload(session_id="old", status="complete"), 0)
+        fresh = _desk_payload(session_id="new", status="running", label="执行中 · 思考中", window_name="新的聊天")
+        self.assertEqual(gate.consider(fresh, 1), "focus")
+
+    def test_log_edges_are_pushed_and_tool_churn_is_not(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".codex"
+            day = root / "sessions" / "2026" / "11" / "06"
+            day.mkdir(parents=True)
+            path = _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line("session_meta", {"id": "main", "thread_source": "user", "cwd": "/work/App", "source": "cli"}),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-06T01:00:00Z"),
+                    ]
+                )
+                + "\n",
+                time.time(),
+            )
+            service = Service(root, TZ)
+            client = service.subscribe()
+            service.publish()
+            first = client.wait(0.2)
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertIn(b'"status":"running"', first)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(_line("event_msg", {"type": "exec_command_begin", "call_id": "c"}, "2026-11-06T01:00:05Z") + "\n")
+            os.utime(path, (time.time(), time.time()))
+            service.publish()
+            self.assertIsNone(client.wait(0.05))
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    _line("event_msg", {"type": "task_complete", "duration_ms": 5000}, "2026-11-06T01:00:10Z") + "\n"
+                )
+            os.utime(path, (time.time(), time.time()))
+            service.publish()
+            done = client.wait(0.2)
+            self.assertIsNotNone(done)
+            assert done is not None
+            self.assertIn(b'"status":"complete"', done)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(_line("event_msg", {"type": "item_completed"}, "2026-11-06T01:04:00Z") + "\n")
+            os.utime(path, (time.time(), time.time()))
+            service.publish()
+            again = client.wait(0.2)
+            self.assertIsNotNone(again)
+            assert again is not None
+            self.assertIn(b'"status":"running"', again)
+
+    def test_event_stream_pushes_hook_start_and_stop_only(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "codex"
+            day = root / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            target = day / "rollout-live.jsonl"
+            target.write_text((FIXTURES / "complete.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
+            service = Service(root, TZ)
+            service.publish()
+            handler = type("BoundHandler", (Handler,), {"service": service})
+            server = codex_status.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            sock = socket.create_connection(("127.0.0.1", server.server_address[1]), timeout=3)
+            state = {"buf": bytearray(), "headers": False}
+            try:
+                sock.sendall(
+                    b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n"
+                )
+                opened = _read_sse(sock, state, 2)
+                self.assertIsNotNone(opened)
+                assert opened is not None
+                self.assertIn(b'"status":"complete"', opened)
+                port = server.server_address[1]
+
+                def post(event: str, tool: str | None = None) -> None:
+                    body = {"hook_event_name": event, "session_id": "sess-done", "cwd": "/Users/me/Developer/NiceShot"}
+                    if tool:
+                        body["tool_name"] = tool
+                    raw = json.dumps(body).encode("utf-8")
+                    conn = HTTPConnection("127.0.0.1", port, timeout=3)
+                    conn.request("POST", "/hook", body=raw)
+                    response = conn.getresponse()
+                    self.assertEqual(response.status, 200)
+                    response.read()
+                    conn.close()
+
+                post("UserPromptSubmit")
+                started = _read_sse(sock, state, 2)
+                self.assertIsNotNone(started)
+                assert started is not None
+                self.assertIn(b'"status":"running"', started)
+                post("PreToolUse", "Bash")
+                self.assertIsNone(_read_sse(sock, state, 0.4))
+                post("Stop")
+                stopped = _read_sse(sock, state, 2)
+                self.assertIsNotNone(stopped)
+                assert stopped is not None
+                self.assertIn(b'"status":"complete"', stopped)
+                self.assertNotIn(b"sk-", stopped)
+            finally:
+                service.stopping.set()
+                sock.close()
+                server.shutdown()
+                thread.join(timeout=2)
 
 
 class FontCoverageTest(unittest.TestCase):

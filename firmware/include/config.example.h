@@ -13,13 +13,10 @@
 // Must match CODEX_STATUS_PORT on the Mac (default 8787).
 #define SIDECAR_PORT 8787
 
-// Used only when mDNS does not resolve. Include the /status path.
+// Used only when mDNS does not resolve. The board opens /events on this
+// host and falls back to a single /status fetch if that stream drops.
 #define SIDECAR_URL "http://192.168.1.50:8787/status"
 
-// Main chatting window is still running. The board does not rotate helpers.
-#define STATUS_POLL_MS 12000
-// complete / interrupted / idle / offline / stale. The screen stays on.
-#define STATUS_POLL_IDLE_MS 30000
 #define WIFI_TIMEOUT_MS 15000
 
 // 1 or 3. If the picture is upside down, switch this.

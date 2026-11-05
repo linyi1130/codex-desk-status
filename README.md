@@ -10,15 +10,13 @@
 
 ## 两段怎么分工
 
-1. Mac 上的 `host/codex_status.py` 只读 `~/.codex/sessions/**/*.jsonl`，在局域网提供 `GET /status`。它不打开 `~/.codex/auth.json`，也不保存提示词和命令内容。
-2. 开发板连上 Wi-Fi，用 mDNS 找 `codex-status.local`，失败再用 `config.h` 里的备用地址，然后把 JSON 画出来。固件里没有 OpenAI / Codex 的 token。
-3. 可选的 hook 只是让「开始一轮 / 调用工具 / 结束」更快反映到屏幕上。额度数字仍然来自会话日志。
+1. Mac 上的 `host/codex_status.py` 只读 `~/.codex/sessions/**/*.jsonl`。浏览器仍可 `GET /status`。开发板不轮询，而是守着 `GET /events`：主会话一开始或结束就推一帧，额度和上下文大约 4 分钟才补一次。它不打开 `~/.codex/auth.json`，也不保存提示词和命令内容。
+2. 开发板连上 Wi-Fi（调制解调器睡眠），用 mDNS 找 `codex-status.local`，失败再用 `config.h` 里的备用地址，然后保持这一条连接。流断了会慢慢重连，并补一次 `/status`。固件里没有 OpenAI / Codex 的 token。
+3. 可选的 hook 让主会话的「开始一轮 / 结束」马上推到屏幕上。工具名来回变不会推送。额度数字仍然来自会话日志。
 
-CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。正在跑的窗口各占一页，大约每 4 秒翻一页；只有一页时不翻。一页就是一个真正在跑的会话（主聊天窗口，或其他同时在跑的会话，包括带着自己上下文的子代理）。空闲、已结束、或超过 30 分钟没有新写入的会话不占页。子代理文件（`session_meta` 里的 `parent_thread_id`，或 `source.subagent` / `thread_source` 标成子会话）即使写得更晚，也不会换成父会话的上下文；它自己在跑时单独成页。
+CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。屏幕只显示用户正在聊的主会话（最近写入、且不是子代理的那个）：侧边栏标题、执行中或已完成/已中断、额度和上下文。子代理不再单独成页。主会话从「执行中」变成结束时，绿色「已完成」或红色「已中断」会留在屏幕上，直到这个会话自己开始下一轮；开发板在收到这一帧时白闪一下。子代理自己结束不会换掉这一页。额度若在主会话文件里是 `null`，会再看另外几个最近的主会话，避免被一次空快照清掉。Pro 套餐经常只有周额度（`window_minutes` 为 10080），五小时窗口可能不存在；两种都解析。五小时用量在 JSON 里，170 像素高的屏幕按设计稿只画「本周额度」和「上下文」。
 
-用户正在聊的主会话是最近写入、且不是子代理的那个。这一页从「执行中」变成结束时，翻页停住大约 8 秒：绿色「已完成」并白闪，或红色「已中断」。停完再翻还在跑的窗口。子代理自己结束不会触发这次提醒。额度若在某一页的文件里是 `null`，会再看另外几个最近的主会话，避免被一次空快照清掉。Pro 套餐经常只有周额度（`window_minutes` 为 10080），五小时窗口可能不存在；两种都解析。五小时用量在 JSON 里，170 像素高的屏幕按设计稿只画「本周额度」和「上下文」。
-
-电量不在 JSON 里。固件用 GPIO4 读电池分压（一半，所以乘 2）。高于 4.3V 是充电器电压，显示 `USB`；低于 2.5V 当作没有电池，显示「无电」。这两种都不编百分比。要在板上看到页码和电量，需要重新烧录；只更新 Mac 边车时，翻页和完成提醒已经会跟着 `/status` 变。
+电量不在 JSON 里。固件用 GPIO4 读电池分压（一半，所以乘 2）。高于 4.3V 是充电器电压，显示 `USB`；低于 2.5V 当作没有电池，显示「无电」。这两种都不编百分比。背光默认 150，写在 `config.h` 的 `BACKLIGHT` 里。要在板上改成推送，需要重新烧录；只更新 Mac 边车时，已经连上的旧固件仍会按它烧进去的间隔去拉 `/status`。
 
 每一页的 `summary` 是这一页自己的短句，画在上下文和底部之间。主会话取最近一条真正的用户请求，套话和 `request_user_input_async` 这类 JSON 工具记录会跳过。子代理优先用 `spawn_agent` 的 `task_name`（写在 `session_meta.agent_path` 上，下划线显示成空格）。`turn_context.summary` 只是 `auto` 这类开关，不当成摘要。没有能用的句子时 `summary` 是 `null`。上下文那一行的 `window_name` 来自 `~/.codex/session_index.jsonl` 里的侧边栏标题（同一个 id 取最新一条 `thread_name`）。子代理页用父会话的标题，不用 `agent_path` 里的内部任务名。索引里没有这条会话时，才退回「主窗口」或任务名。摘要行仍然分开：主会话是清理后的最近请求，子代理可以仍是短任务名。响应里只有截断后的短句，没有完整提示词或命令。
 
@@ -150,7 +148,8 @@ cp firmware/include/config.example.h firmware/include/config.h
 - `WIFI_SSID` / `WIFI_PASSWORD`：开发板要加入的网络，和 Mac 同一个。
 - `MDNS_HOST`：默认 `codex-status`，要和边车的 `CODEX_STATUS_MDNS_NAME` 一致。
 - `SIDECAR_PORT`：默认 `8787`。
-- `SIDECAR_URL`：mDNS 失败时用的完整地址，例如 `http://192.168.1.20:8787/status`。这是唯一需要写 IP 的地方，不要提交 `config.h`。
+- `SIDECAR_URL`：mDNS 失败时用的地址，例如 `http://192.168.1.20:8787/status`。开发板会连这个主机的 `/events`。这是唯一需要写 IP 的地方，不要提交 `config.h`。
+- `BACKLIGHT`：`0`–`255`，示例是 `150`。旧的 `config.h` 如果还是 `220`，烧录前改成 `150`。
 - `DISPLAY_ROTATION`：`1` 或 `3`。画面上下颠倒就换另一个。
 - `DEMO_MODE`：先设为 `1` 可以不连网，在板上轮播运行中、思考、编辑、完成、中断、高额度、断线和没连上 Wi-Fi。确认中文和布局后改回 `0`。
 
@@ -210,7 +209,7 @@ pio device monitor
 | --- | --- |
 | JSON 里 `message` 是找不到 sessions | 确认 Codex 至少跑过一轮，目录是 `~/.codex/sessions/年/月/日/rollout-*.jsonl` |
 | 额度一直是空的 | 有的会话把 `rate_limits` 写成 `null`。再跑一轮，或看别的最近会话里有没有百分比。已压缩的 `.jsonl.zst` 不读 |
-| 浏览器打得开，板子不行 | 板子和 Mac 是否同一网段；macOS 是否允许 Python 的本地网络；`SIDECAR_URL` 是否写成 Mac 的局域网 IP，并且带 `/status` |
+| 浏览器打得开，板子不行 | 板子和 Mac 是否同一网段；macOS 是否允许 Python 的本地网络；`SIDECAR_URL` 是否写成 Mac 的局域网 IP。板子连的是 `/events`，断线时才回退拉一次 `/status` |
 | 屏幕全黑 | 先确认烧的是这块经典 T-Display-S3。固件会在初始化前把 GPIO15 拉高给屏幕供电 |
 | 中文是方块 | 不要换回 TFT 自带的拉丁字体。字形在 `firmware/src/font_zh.cpp`。字库含界面文案、`TITLE_SEED`，以及《现代汉语常用字表》3500 字（`firmware/scripts/common_han_3500.txt`）。侧边栏标题不在源码里，所以靠这张常用字表来画。表外的生僻字加进 `firmware/scripts/gen_font.py` 的 `TITLE_SEED`，然后运行 `FONT_PATH=/tmp/fonts/NotoSansSC-Regular.otf python3 firmware/scripts/gen_font.py`。不要把 `~/.codex/session_index.jsonl` 读进字库 |
 | 一轮停在「执行中」很久 | 会话文件超过 30 分钟没有新写入时，标签会回到「等待中」，避免一个已经退出的进程一直转 |
