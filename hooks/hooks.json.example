@@ -1,0 +1,53 @@
+{
+  "description": "Desk display hooks. Merge these entries into ~/.codex/hooks.json. Do not replace other hooks, and do not edit the TokenEconomizer plugin.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /ABSOLUTE/PATH/hooks/codex_status_hook.py",
+            "timeout": 2,
+            "statusMessage": "更新桌面状态"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /ABSOLUTE/PATH/hooks/codex_status_hook.py",
+            "timeout": 2,
+            "statusMessage": "更新桌面状态"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /ABSOLUTE/PATH/hooks/codex_status_hook.py",
+            "timeout": 2,
+            "statusMessage": "更新桌面状态"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /ABSOLUTE/PATH/hooks/codex_status_hook.py",
+            "timeout": 2,
+            "statusMessage": "更新桌面状态"
+          }
+        ]
+      }
+    ]
+  }
+}

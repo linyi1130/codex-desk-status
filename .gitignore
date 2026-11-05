@@ -1,0 +1,9 @@
+host/.env
+firmware/include/config.h
+firmware/.pio/
+.pio/
+**/__pycache__/
+*.pyc
+.DS_Store
+agent-tools/
+*.egg-info/

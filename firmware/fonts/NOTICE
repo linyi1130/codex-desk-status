@@ -1,0 +1,8 @@
+Glyph bitmaps in firmware/src/font_zh.cpp are rasterized from
+Noto Sans CJK SC Regular (Noto Sans SC), Copyright 2014-2021 Adobe
+(http://www.adobe.com/), with Reserved Font Name 'Source'.
+
+The face is licensed under the SIL Open Font License 1.1.
+The full license text is firmware/fonts/OFL.txt.
+The original font file is not vendored. Regenerate the bitmaps with
+firmware/scripts/gen_font.py if the on-screen copy changes.

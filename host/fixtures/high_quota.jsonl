@@ -1,0 +1,4 @@
+{"timestamp":"2026-11-05T00:25:00.000Z","type":"session_meta","payload":{"id":"sess-hot","cwd":"/Users/me/Developer/NiceShot","source":"cli"}}
+{"timestamp":"2026-11-05T00:26:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-hot"}}
+{"timestamp":"2026-11-05T00:26:05.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"still thinking"}]}}
+{"timestamp":"2026-11-05T00:26:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":450000,"output_tokens":2000,"total_tokens":452000},"model_context_window":475000},"rate_limits":{"limit_id":"codex","primary":{"used_percent":99,"window_minutes":300,"resets_at":1793842000},"secondary":{"used_percent":96,"window_minutes":10080,"resets_at":1794356832},"plan_type":"pro","rate_limit_reached_type":"weekly"}}}

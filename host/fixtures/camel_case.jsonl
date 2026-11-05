@@ -1,0 +1,3 @@
+{"timestamp":"2026-11-05T00:23:00Z","type":"session_meta","payload":{"id":"sess-camel","cwd":"/Users/me/apps/Desk"}}
+{"timestamp":"2026-11-05T00:23:00Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-11-05T00:24:00Z","type":"event_msg","payload":{"type":"token_count","info":{"lastTokenUsage":{"inputTokens":1000,"outputTokens":50},"modelContextWindow":200000},"rateLimits":{"planType":"business","primary":{"usedPercent":12.5,"windowDurationMins":300,"resetsAt":1793845632},"secondary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":1794356832}}}}
