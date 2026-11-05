@@ -19,6 +19,7 @@ from codex_status import (
     Handler,
     Service,
     client_is_local,
+    load_thread_titles,
 )
 from parse_session import HookHint, SessionFollower, hint_from_hook, parse_jsonl
 
@@ -1136,6 +1137,81 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(child["window_name"], "fix battery")
             self.assertEqual(child["context_used_tokens"], 410000)
             self.assertEqual(child["page_index"], 2)
+
+    def test_sidebar_title_is_shared_by_parent_and_child_pages(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / ".codex"
+            day = root / "sessions" / "2026" / "11" / "05"
+            day.mkdir(parents=True)
+            (root / "session_index.jsonl").write_text(
+                "\n".join(
+                    [
+                        '{"id":"main-chat","thread_name":"请查桌面","updated_at":"2026-11-05T00:01:00Z"}',
+                        '{"id":"other","thread_name":"请打开新页面","updated_at":"2026-11-05T00:30:00Z"}',
+                        '{"id":"main-chat","thread_name":"请查桌面状态","updated_at":"2026-11-05T00:20:00Z"}',
+                        '{"id":"mid-agent","thread_name":"fix battery","updated_at":"2026-11-05T00:40:00Z"}',
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _write(
+                day,
+                "rollout-main.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {
+                                "id": "main-chat",
+                                "session_id": "main-chat",
+                                "thread_source": "user",
+                                "cwd": "/work/App",
+                                "source": "cli",
+                            },
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:23:00Z"),
+                        _line("event_msg", {"type": "user_message", "message": "请把桌面状态改一下"}, "2026-11-05T00:26:00Z"),
+                        _tokens(218000, "2026-11-05T00:26:05Z", weekly=22),
+                    ]
+                ),
+                NOW - 10,
+            )
+            _write(
+                day,
+                "rollout-child.jsonl",
+                "\n".join(
+                    [
+                        _line(
+                            "session_meta",
+                            {
+                                "id": "child",
+                                "session_id": "main-chat",
+                                "parent_thread_id": "mid-agent",
+                                "thread_source": "subagent",
+                                "agent_path": "fix_battery",
+                                "cwd": "/work/App",
+                            },
+                        ),
+                        _line("event_msg", {"type": "task_started"}, "2026-11-05T00:26:20Z"),
+                        _tokens(410000, "2026-11-05T00:26:30Z"),
+                    ]
+                ),
+                NOW,
+            )
+            titles = load_thread_titles(root / "session_index.jsonl")
+            self.assertEqual(titles["main-chat"], "请查桌面状态")
+            engine = Engine()
+            parent = engine.payload(root, NOW, TZ, None)
+            child = engine.payload(root, NOW + PAGE_DWELL_SECONDS, TZ, None)
+            self.assertEqual(parent["window_name"], "请查桌面状态")
+            self.assertEqual(parent["summary"], "请把桌面状态改一下")
+            self.assertEqual(child["session_id"], "child")
+            self.assertEqual(child["window_name"], "请查桌面状态")
+            self.assertEqual(child["summary"], "fix battery")
+            self.assertNotEqual(child["window_name"], child["summary"])
 
 
 class FontCoverageTest(unittest.TestCase):

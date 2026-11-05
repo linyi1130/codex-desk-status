@@ -92,10 +92,9 @@ void showDemo(uint8_t index) {
   gState.pageIndex = (index == 0) ? 2 : 1;
   gState.pageCount = (index == 0) ? 4 : 1;
   const char* summary = "";
-  const char* windowName = "主窗口";
+  const char* windowName = "请查桌面状态";
   if (index == 0) {
     summary = "请把桌面状态改一下";
-    windowName = "design review";
   } else if (index == 1 || index == 2) {
     summary = "请把桌面状态改一下";
   } else if (index == 3) {

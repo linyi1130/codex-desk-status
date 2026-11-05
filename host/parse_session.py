@@ -630,12 +630,31 @@ _WINDOW_NAME_LIMIT = 18
 _MAIN_WINDOW_NAME = "主窗口"
 
 
-def window_name(view: SessionView) -> str | None:
-    """Short name for the context row. Each rollout uses its own task name.
+def thread_title_ids(view: SessionView) -> list[str]:
+    """Ids to look up in ``session_index.jsonl`` for the sidebar title.
 
-    Sub-agents show ``agent_path`` (Codex copies ``spawn_agent.task_name``
-    there, underscores as spaces). The user's chat has no task name, so it
-    is labeled 主窗口 instead of repeating the project name.
+    A user chat is stored under its own thread id. A sub-agent usually is
+    not listed; its ``session_id`` is the parent user thread, and
+    ``parent_thread_id`` is the immediate parent. Prefer the root id so a
+    nested agent still shows the chat the user sees in the sidebar.
+    """
+    if is_child_session(view):
+        ids: list[str] = []
+        if view.root_session_id and view.root_session_id != view.session_id:
+            ids.append(view.root_session_id)
+        if view.parent_thread_id and view.parent_thread_id not in ids:
+            ids.append(view.parent_thread_id)
+        return ids
+    if view.session_id:
+        return [view.session_id]
+    return []
+
+
+def window_name(view: SessionView) -> str | None:
+    """Fallback label when ``session_index.jsonl`` has no sidebar title.
+
+    Sub-agents then show ``agent_path`` (underscores as spaces). The user's
+    chat is labeled 主窗口 instead of repeating the project name.
     """
     task = task_label(view.agent_path)
     if task:

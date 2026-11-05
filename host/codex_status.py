@@ -40,6 +40,7 @@ from parse_session import (
     merge_quota,
     parse_file,
     read_session_head,
+    thread_title_ids,
 )
 
 
@@ -105,6 +106,93 @@ def page_sort_key(payload: dict, focus_id: object) -> tuple[int, str]:
     return (0 if identity and identity == focus_id else 1, identity)
 
 
+def load_thread_titles(path: Path) -> dict[str, str]:
+    """Latest sidebar name for each thread id in ``session_index.jsonl``.
+
+    Codex appends one ``{id, thread_name, updated_at}`` line per rename.
+    The newest ``updated_at`` wins. A missing timestamp, or a tie, keeps
+    the later line.
+    """
+    best: dict[str, tuple[str, str, int]] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for seq, line in enumerate(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        thread_id = record.get("id")
+        title = record.get("thread_name")
+        if not isinstance(thread_id, str) or not isinstance(title, str):
+            continue
+        thread_id = thread_id.strip()
+        title = title.strip()
+        if not thread_id or not title:
+            continue
+        updated = record.get("updated_at")
+        updated_at = updated.strip() if isinstance(updated, str) else ""
+        previous = best.get(thread_id)
+        if previous is None:
+            best[thread_id] = (updated_at, title, seq)
+            continue
+        old_at, _, old_seq = previous
+        if not updated_at or not old_at:
+            if seq >= old_seq:
+                best[thread_id] = (updated_at or old_at, title, seq)
+            continue
+        if updated_at > old_at or (updated_at == old_at and seq >= old_seq):
+            best[thread_id] = (updated_at, title, seq)
+    return {thread_id: title for thread_id, (_, title, _) in best.items()}
+
+
+def clip_sidebar_title(title: str, limit: int = 32) -> str:
+    if len(title) <= limit:
+        return title
+    return title[: limit - 1].rstrip() + "…"
+
+
+def apply_sidebar_title(payload: dict, view: SessionView, titles: dict[str, str]) -> dict:
+    for thread_id in thread_title_ids(view):
+        title = titles.get(thread_id)
+        if title:
+            payload["window_name"] = clip_sidebar_title(title)
+            return payload
+    return payload
+
+
+class ThreadTitleIndex:
+    """Reload ``session_index.jsonl`` only when the append-only file changes."""
+
+    def __init__(self) -> None:
+        self.path: Path | None = None
+        self.signature: tuple[int, int] | None = None
+        self.titles: dict[str, str] = {}
+
+    def get(self, codex_home: Path) -> dict[str, str]:
+        path = Path(codex_home).expanduser() / "session_index.jsonl"
+        try:
+            stat = path.stat()
+        except OSError:
+            self.path = path
+            self.signature = None
+            self.titles = {}
+            return self.titles
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if self.path == path and self.signature == signature:
+            return self.titles
+        self.path = path
+        self.signature = signature
+        self.titles = load_thread_titles(path)
+        return self.titles
+
+
 def stamp_page(payload: dict, index: int, count: int) -> dict:
     payload["page_index"] = index
     payload["page_count"] = count
@@ -126,6 +214,7 @@ class Engine:
         self.hold_session: str | None = None
         self.rotation_ids: tuple[str, ...] | None = None
         self.rotation_anchor: float | None = None
+        self.thread_titles = ThreadTitleIndex()
 
     def payload(
         self,
@@ -140,6 +229,7 @@ class Engine:
             message = "还没有 Codex 会话" if sessions.is_dir() else "找不到 ~/.codex/sessions"
             return stamp_page(empty_payload(now, tz_offset_seconds, message), 1, 1)
         focus_path = self.select_main(files)
+        titles = self.thread_titles.get(codex_home)
         try:
             focus_view = self.follower.sync(focus_path)
         except OSError as exc:
@@ -156,6 +246,7 @@ class Engine:
             hook,
             is_focus=True,
             file_mtime=self.focus_mtime(focus_path, focus_view, fresh),
+            titles=titles,
         )
         running = []
         if focus_payload["status"] == "running":
@@ -170,6 +261,7 @@ class Engine:
                 hook,
                 is_focus=False,
                 file_mtime=mtime,
+                titles=titles,
             )
             if page["status"] == "running":
                 running.append(page)
@@ -307,6 +399,7 @@ class Engine:
         hook: HookHint | None,
         is_focus: bool,
         file_mtime: float | None,
+        titles: dict[str, str],
     ) -> dict:
         shown = view if (view.weekly or view.five_hour) else merge_quota(view, pool)
         payload = build_payload(
@@ -319,7 +412,7 @@ class Engine:
         )
         if payload["source"] == "session" and not payload["has_session"]:
             payload["has_session"] = True
-        return payload
+        return apply_sidebar_title(payload, view, titles)
 
     def note_focus(self, now: float, focus_payload: dict) -> None:
         status = str(focus_payload.get("status") or "")

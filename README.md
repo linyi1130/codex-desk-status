@@ -20,7 +20,7 @@ CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。正在跑的窗口
 
 电量不在 JSON 里。固件用 GPIO4 读电池分压（一半，所以乘 2）。高于 4.3V 是充电器电压，显示 `USB`；低于 2.5V 当作没有电池，显示「无电」。这两种都不编百分比。要在板上看到页码和电量，需要重新烧录；只更新 Mac 边车时，翻页和完成提醒已经会跟着 `/status` 变。
 
-每一页的 `summary` 是这一页自己的短句，画在上下文和底部之间。主会话取最近一条真正的用户请求，套话和 `request_user_input_async` 这类 JSON 工具记录会跳过。子代理优先用 `spawn_agent` 的 `task_name`（写在 `session_meta.agent_path` 上，下划线显示成空格）。`turn_context.summary` 只是 `auto` 这类开关，不当成摘要。没有能用的句子时 `summary` 是 `null`。上下文那一行旁边还有 `window_name`：子代理是任务名，用户自己的聊天是「主窗口」。响应里只有截断后的短句，没有完整提示词或命令。
+每一页的 `summary` 是这一页自己的短句，画在上下文和底部之间。主会话取最近一条真正的用户请求，套话和 `request_user_input_async` 这类 JSON 工具记录会跳过。子代理优先用 `spawn_agent` 的 `task_name`（写在 `session_meta.agent_path` 上，下划线显示成空格）。`turn_context.summary` 只是 `auto` 这类开关，不当成摘要。没有能用的句子时 `summary` 是 `null`。上下文那一行的 `window_name` 来自 `~/.codex/session_index.jsonl` 里的侧边栏标题（同一个 id 取最新一条 `thread_name`）。子代理页用父会话的标题，不用 `agent_path` 里的内部任务名。索引里没有这条会话时，才退回「主窗口」或任务名。摘要行仍然分开：主会话是清理后的最近请求，子代理可以仍是短任务名。响应里只有截断后的短句，没有完整提示词或命令。
 
 ## 目录
 
