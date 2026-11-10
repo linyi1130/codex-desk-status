@@ -11,6 +11,7 @@ Run: ``python3 codex_status.py``
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import queue
@@ -27,6 +28,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import parse_session
+from grok_status import GrokReader
 from parse_session import (
     STALE_RUNNING_SECONDS,
     HookHint,
@@ -519,9 +521,13 @@ class StreamClient:
 
 
 class Service:
-    def __init__(self, codex_home: Path, tz_offset: int | None) -> None:
+    def __init__(self, codex_home: Path, tz_offset: int | None, token: str = "", grok: GrokReader | None = None) -> None:
         self.codex_home = codex_home
         self.tz_offset = tz_offset
+        # Optional shared secret for /status and /events. Empty means open.
+        self.token = token
+        # Read-only Grok Bot usage and app state, cached for a few seconds.
+        self.grok = grok if grok is not None else GrokReader()
         self.engine = Engine()
         self.lock = threading.Lock()
         self.hook: HookHint | None = None
@@ -562,7 +568,9 @@ class Service:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return dict(self.payload)
+            payload = dict(self.payload)
+        payload["grok"] = self.grok.get()
+        return payload
 
     def accept_hook(self, body: dict) -> None:
         hint = hint_from_hook(body, time.time())
@@ -661,8 +669,25 @@ class Handler(BaseHTTPRequestHandler):
     service: Service
     protocol_version = "HTTP/1.1"
 
+    def _authorized(self) -> bool:
+        """Shared-token check for /status and /events.
+
+        Open when no token is configured. Loopback clients (the local browser
+        preview) are always allowed; LAN clients must send ``X-Status-Token``.
+        """
+        token = self.service.token
+        if not token:
+            return True
+        if client_is_local(self.client_address[0]):
+            return True
+        supplied = self.headers.get("X-Status-Token", "")
+        return hmac.compare_digest(supplied.encode("utf-8"), token.encode("utf-8"))
+
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path in {"/events", "/status", "/status.json", "/api/status"} and not self._authorized():
+            self._send(401, {"ok": False, "message": "需要 X-Status-Token"}, "application/json; charset=utf-8")
+            return
         if path == "/events":
             self._stream_events()
             return
@@ -783,8 +808,16 @@ def start_mdns(name: str, port: int, ip: str) -> subprocess.Popen | None:
     return process
 
 
-def serve(codex_home: Path, host: str, port: int, mdns_name: str, poll_seconds: float, tz_offset: int | None) -> int:
-    service = Service(codex_home, tz_offset)
+def serve(
+    codex_home: Path,
+    host: str,
+    port: int,
+    mdns_name: str,
+    poll_seconds: float,
+    tz_offset: int | None,
+    token: str = "",
+) -> int:
+    service = Service(codex_home, tz_offset, token)
     service.publish()
     handler = type("BoundHandler", (Handler,), {"service": service})
     try:
@@ -799,6 +832,7 @@ def serve(codex_home: Path, host: str, port: int, mdns_name: str, poll_seconds: 
     log(f"监听  http://{host}:{actual_port}/status")
     log(f"推送  http://{host}:{actual_port}/events")
     log(f"本机  http://127.0.0.1:{actual_port}/")
+    log("令牌  已启用（局域网客户端需带 X-Status-Token）" if token else "令牌  未设置（/status 与 /events 对局域网开放）")
     if ip != "127.0.0.1":
         log(f"局域网 http://{ip}:{actual_port}/status")
     mdns = start_mdns(mdns_name, actual_port, ip)
@@ -856,6 +890,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tz-offset", type=int, default=None, help="时区偏移秒数，例如东八区 28800")
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="共享令牌，更推荐用环境变量 CODEX_STATUS_TOKEN（命令行参数会出现在 ps 里）",
+    )
     return parser
 
 
@@ -879,7 +918,8 @@ def main(argv: list[str] | None = None) -> int:
     port = args.port if args.port is not None else int(os.environ.get("CODEX_STATUS_PORT", DEFAULT_PORT))
     mdns_name = os.environ.get("CODEX_STATUS_MDNS_NAME", DEFAULT_MDNS).strip() or DEFAULT_MDNS
     poll = float(os.environ.get("CODEX_STATUS_POLL", "0.8"))
-    return serve(codex_home, host, port, mdns_name, poll, tz)
+    token = (args.token if args.token is not None else os.environ.get("CODEX_STATUS_TOKEN", "")).strip()
+    return serve(codex_home, host, port, mdns_name, poll, tz, token)
 
 
 if __name__ == "__main__":

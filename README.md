@@ -20,6 +20,12 @@ CLI 和 ChatGPT 应用的 Codex 共用 `~/.codex/sessions/`。屏幕只显示用
 
 每一页的 `summary` 是这一页自己的短句，画在上下文和底部之间。主会话取最近一条真正的用户请求，套话和 `request_user_input_async` 这类 JSON 工具记录会跳过。子代理优先用 `spawn_agent` 的 `task_name`（写在 `session_meta.agent_path` 上，下划线显示成空格）。`turn_context.summary` 只是 `auto` 这类开关，不当成摘要。没有能用的句子时 `summary` 是 `null`。上下文那一行的 `window_name` 来自 `~/.codex/session_index.jsonl` 里的侧边栏标题（同一个 id 取最新一条 `thread_name`）。子代理页用父会话的标题，不用 `agent_path` 里的内部任务名。索引里没有这条会话时，才退回「主窗口」或任务名。摘要行仍然分开：主会话是清理后的最近请求，子代理可以仍是短任务名。响应里只有截断后的短句，没有完整提示词或命令。
 
+## Grok Bot 用量与共享令牌（可选）
+
+`/status` 里多一个 `grok` 段，来自 `host/grok_status.py`：只读 `~/Library/Application Support/Grok Bot/` 下的 `desktop-status.json`（App 是否运行、是否登录）和 `sand-client-persistence` 里的 `*weekly-usage.cache`（本周用量百分比、下次重置时间）。不会打开 roster、对话回放、草稿、cookie 或任何 secrets 文件。读不到时 `state` 是 `unavailable`，不影响 Codex 部分。字段：`state`（`ok`/`closed`/`unavailable`）、`weekly_percent`、`next_reset_unix`、`reset_text`、`read_at_unix`、`app_running`、`signed_in`、`usage_stale`。缓存格式是 Grok Bot 的私有细节，升级后可能失效。
+
+共享令牌：设置环境变量 `CODEX_STATUS_TOKEN`（写在 `host/.env` 或 launchd 的环境里，不要写进命令行参数）后，局域网客户端访问 `/status` 和 `/events` 必须带 `X-Status-Token: <令牌>`；`/health` 仍开放，`/hook` 仍只接受本机，本机（127.0.0.1）浏览器预览不需要头。不设置则保持原来的开放行为。令牌自己生成，例如 `python3 -c "import secrets;print(secrets.token_urlsafe(24))"`，并把同一个值写进板子固件的 `CODEX_TOKEN`。
+
 ## 目录
 
 | 路径 | 作用 |
