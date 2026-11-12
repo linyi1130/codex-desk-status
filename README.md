@@ -10,7 +10,7 @@
 
 ## 两段怎么分工
 
-1. Mac 上的 `host/codex_status.py` 只读 `~/.codex/sessions/**/*.jsonl`。浏览器仍可 `GET /status`。开发板不轮询，而是守着 `GET /events`：主会话一开始或结束就推一帧，额度和上下文大约 4 分钟才补一次。它不打开 `~/.codex/auth.json`，也不保存提示词和命令内容。
+1. Mac 上的 `host/codex_status.py` 只读 `~/.codex/sessions/**/*.jsonl`、`session_index.jsonl`，以及 `state_5.sqlite` / `thread_history_1.sqlite`（只读短连接）。浏览器仍可 `GET /status`。服务先监听端口，再在后台扫描会话；超大的历史 jsonl 只读头尾，避免 `/status` 被长时间卡住。开发板会轮询 `/status`，也可守着 `GET /events`：主会话一开始或结束就推一帧，额度和上下文大约 4 分钟才补一次。它不打开 `~/.codex/auth.json`，也不保存提示词和命令内容。
 2. 开发板连上 Wi-Fi（调制解调器睡眠），用 mDNS 找 `codex-status.local`，失败再用 `config.h` 里的备用地址，然后保持这一条连接。流断了会慢慢重连，并补一次 `/status`。固件里没有 OpenAI / Codex 的 token。
 3. 可选的 hook 让主会话的「开始一轮 / 结束」马上推到屏幕上。工具名来回变不会推送。额度数字仍然来自会话日志。
 
@@ -106,10 +106,19 @@ python3 host/codex_status.py \
   "footer": "NiceShot · 本轮已运行 4分12秒",
   "summary": null,
   "window_name": "主窗口",
-  "message": null
+  "message": null,
+  "pet_state": "running",
+  "pet_label": "运行中",
+  "pet_title": "（侧边栏标题，约 32 字）",
+  "pet_thread_id": "thread-id",
+  "pet_age_s": 20,
+  "counts": {"needs_input": 0, "blocked": 0, "ready": 1, "running": 1, "idle": 2},
+  "threads": [{"id": "thread-id", "state": "running", "title": "（侧边栏标题）", "age_s": 20}]
 }
 ```
 
+
+`pet_state` / `pet_label` / `pet_title` / `pet_thread_id` / `pet_age_s`、`counts` 和最多 8 条 `threads[]` 是伴侣页用的只读摘要（`needs_input` > `running` > `blocked` > `ready` > `idle`；短时间内失败的命令行任务视为空闲）。旧字段保持不变，监视页不用改。`needs_input` 目前主要来自可选的 `PermissionRequest` hook。
 `label`、`color`、两个百分比、`context_text`、`footer` 是屏幕直接用的字段。`five_hour_*` 只在日志里出现时才有值，屏幕不画它。`status` 为 `running`、`complete`、`interrupted`、`idle` 或 `quota`。
 
 开发板大约每 2 秒拉一次。日志在 Mac 上大约每 0.8 秒重读追加的部分。
@@ -133,7 +142,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.codex-status.plist
 不要修改 `~/Developer/TokenEconomizer`。那个插件自己带 hook，Codex 会和用户级 hook 一起加载。这里只往 `~/.codex/hooks.json` 里**追加**条目，不要整文件覆盖，以免弄掉你已经有的别的 hook。
 
 1. 把 `hooks/hooks.json.example` 里四段命令的路径改成 `hooks/codex_status_hook.py` 的绝对路径。
-2. 若还没有 `~/.codex/hooks.json`，可以把示例文件复制过去。若已经有，把 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop` 数组合并进去。
+2. 若还没有 `~/.codex/hooks.json`，可以把示例文件复制过去。若已经有，把 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`、`Stop`、`PermissionRequest` 数组合并进去。
 3. 在 Codex 里打开 `/hooks`，信任这条新命令。没信任之前 Codex 会跳过它。
 4. 边车要先在本机 `8787` 端口跑着。hook 只访问 `127.0.0.1`，超时 0.4 秒，失败也打印 `{"continue": true}`，不会卡住一轮。它不转发提示词和工具参数。
 
@@ -228,10 +237,10 @@ pio device monitor
 python3 -m unittest discover -s host -v
 ```
 
-样例覆盖：周额度在 secondary、Pro 只有周额度且放在 primary、camelCase、`resets_in_seconds`、`rate_limits: null` 不能把已有额度清掉、上下文用最后一轮的 token 而不是整段会话累计、命令参数不会出现在 JSON 里、本机 hook 能把「已完成」立刻改成「执行中 · 跑命令」、非本机的 hook 地址会被拒绝、更新的子代理文件不会抢走主会话的上下文或额度，主会话的完成和中断仍会显示。
+样例覆盖：周额度在 secondary、Pro 只有周额度且放在 primary、camelCase、`resets_in_seconds`、`rate_limits: null` 不能把已有额度清掉、上下文用最后一轮的 token 而不是整段会话累计、命令参数不会出现在 JSON 里、本机 hook 能把「已完成」立刻改成「执行中 · 跑命令」、非本机的 hook 地址会被拒绝、更新的子代理文件不会抢走主会话的上下文或额度，主会话的完成和中断仍会显示、thread_status 的优先级归类（interrupted 和过期 inProgress 视为空闲、子代理折进父会话、不把 first_user_message 写入 JSON）。
 
 ## 隐私
 
-- 边车对 `~/.codex` 只读，并且只扫 `sessions/` 下的 `.jsonl`。
+- 边车对 `~/.codex` 只读：会话日志、`session_index.jsonl` 里的侧边栏标题，以及 `state_5.sqlite` / `thread_history_1.sqlite` 里的线程状态。响应不含 `first_user_message`、提示词、命令内容或 `auth.json`。
 - 响应里有项目目录名、套餐名、百分比、token 数量和状态。没有提示词、命令行、补丁内容、API key。
 - `config.h` 和 `host/.env` 已在 `.gitignore` 里。仓库里的 Wi-Fi 和 IP 都是占位符。

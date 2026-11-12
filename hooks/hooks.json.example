@@ -48,6 +48,18 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 /ABSOLUTE/PATH/hooks/codex_status_hook.py",
+            "timeout": 2,
+            "statusMessage": "更新桌面状态"
+          }
+        ]
+      }
     ]
   }
 }

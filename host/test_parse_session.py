@@ -1531,5 +1531,59 @@ class FontCoverageTest(unittest.TestCase):
         self.assertEqual(missing, [])
 
 
+class OversizedSessionAndSnapshotTest(unittest.TestCase):
+    def test_follower_skips_middle_of_oversized_file(self) -> None:
+        import tempfile
+
+        old_cap = parse_session.MAX_FULL_PARSE_BYTES
+        parse_session.MAX_FULL_PARSE_BYTES = 180
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "rollout-huge.jsonl"
+                meta = '{"timestamp":"2026-11-05T00:20:00Z","type":"session_meta","payload":{"id":"huge","thread_source":"user","cwd":"/work/App","source":"cli"}}\n'
+                start = '{"timestamp":"2026-11-05T00:21:00Z","type":"event_msg","payload":{"type":"task_started"}}\n'
+                pad = '{"timestamp":"2026-11-05T00:21:30Z","type":"event_msg","payload":{"type":"item_completed"}}\n' * 40
+                done = '{"timestamp":"2026-11-05T00:24:00Z","type":"event_msg","payload":{"type":"task_complete","duration_ms":60000}}\n'
+                path.write_text(meta + start + pad + done, encoding="utf-8")
+                self.assertGreater(path.stat().st_size, parse_session.MAX_FULL_PARSE_BYTES)
+                follower = SessionFollower()
+                view = follower.sync(path)
+                self.assertEqual(view.session_id, "huge")
+                self.assertEqual(view.phase, "complete")
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        '{"timestamp":"2026-11-05T00:25:00Z","type":"event_msg","payload":{"type":"task_started"}}\n'
+                    )
+                self.assertEqual(follower.sync(path).phase, "running")
+        finally:
+            parse_session.MAX_FULL_PARSE_BYTES = old_cap
+
+    def test_snapshot_stays_fast_during_slow_publish(self) -> None:
+        import tempfile
+
+        class SlowEngine:
+            def payload(self, *args, **kwargs):
+                time.sleep(0.4)
+                return codex_status.empty_payload(time.time(), TZ, "slow")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "codex"
+            (root / "sessions").mkdir(parents=True)
+            service = Service(root, TZ)
+            service.engine = SlowEngine()
+            worker = threading.Thread(target=service.publish)
+            worker.start()
+            time.sleep(0.05)
+            started = time.time()
+            snap = service.snapshot()
+            elapsed = time.time() - started
+            self.assertLess(elapsed, 0.15)
+            self.assertIn("status", snap)
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive())
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

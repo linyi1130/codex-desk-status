@@ -28,6 +28,10 @@ from pathlib import Path
 DAY_MINUTES = 24 * 60
 STALE_RUNNING_SECONDS = 30 * 60
 QUOTA_HOT_PERCENT = 90.0
+# Full-parse cap. A few old rollouts are multiple gigabytes; first sync
+# reads the leading records (identity) plus the last MAX_FULL_PARSE_BYTES
+# (latest events), then follows new appends from the end.
+MAX_FULL_PARSE_BYTES = 32 * 1024 * 1024
 
 START_EVENTS = {"task_started", "turn_started", "task_start"}
 DONE_EVENTS = {"task_complete", "turn_complete", "task_completed", "turn_completed"}
@@ -153,28 +157,12 @@ class SessionFollower:
         self.buf = b""
         self.view = SessionView()
 
-    def sync(self, path: Path) -> SessionView:
-        path = Path(path)
-        if self.path != path:
-            self.path = path
-            self.offset = 0
-            self.buf = b""
-            self.view = SessionView()
-        size = path.stat().st_size
-        if size < self.offset:
-            self.path = path
-            self.offset = 0
-            self.buf = b""
-            self.view = SessionView()
-        with path.open("rb") as handle:
-            handle.seek(self.offset)
-            chunk = handle.read()
-            self.offset = handle.tell()
+    def _ingest(self, chunk: bytes) -> None:
         if chunk:
             self.buf += chunk
         if len(self.buf) > 8_000_000 and b"\n" not in self.buf:
             self.buf = b""
-            return self.view
+            return
         while True:
             newline = self.buf.find(b"\n")
             if newline < 0:
@@ -191,6 +179,48 @@ class SessionFollower:
             else:
                 apply_line(self.view, pending.decode("utf-8", "replace"))
                 self.buf = b""
+
+    def sync(self, path: Path) -> SessionView:
+        path = Path(path)
+        if self.path != path:
+            self.path = path
+            self.offset = 0
+            self.buf = b""
+            self.view = SessionView()
+        size = path.stat().st_size
+        if size < self.offset:
+            self.path = path
+            self.offset = 0
+            self.buf = b""
+            self.view = SessionView()
+        with path.open("rb") as handle:
+            if self.offset == 0 and size > MAX_FULL_PARSE_BYTES:
+                # Leading records for identity, then the tail for latest
+                # events. Skip the bulky middle.
+                for _ in range(_HEAD_LINE_COUNT):
+                    raw = handle.readline(_HEAD_LINE_CAP)
+                    if not raw:
+                        break
+                    if len(raw) >= _HEAD_LINE_CAP and not raw.endswith((b"\n", b"\r")):
+                        break
+                    apply_line(self.view, raw.decode("utf-8", "replace"))
+                already = handle.tell()
+                tail_start = size - MAX_FULL_PARSE_BYTES
+                if tail_start > already:
+                    self.buf = b""
+                    handle.seek(tail_start)
+                    tail = handle.read()
+                    newline = tail.find(b"\n")
+                    tail = tail[newline + 1 :] if newline >= 0 else b""
+                    self._ingest(tail)
+                else:
+                    self._ingest(handle.read())
+                self.offset = handle.tell()
+                return self.view
+            handle.seek(self.offset)
+            chunk = handle.read()
+            self.offset = handle.tell()
+        self._ingest(chunk)
         return self.view
 
 

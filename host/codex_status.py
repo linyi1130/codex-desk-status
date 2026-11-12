@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 
 import parse_session
 from grok_status import GrokReader
+import thread_status
 from parse_session import (
     STALE_RUNNING_SECONDS,
     HookHint,
@@ -217,14 +218,24 @@ class Engine:
         files = list_session_files(sessions)
         if not files:
             message = "还没有 Codex 会话" if sessions.is_dir() else "找不到 ~/.codex/sessions"
-            return stamp_page(empty_payload(now, tz_offset_seconds, message), 1, 1)
+            return self._with_pet(
+                stamp_page(empty_payload(now, tz_offset_seconds, message), 1, 1),
+                codex_home,
+                now,
+                hook,
+            )
         focus_path = self.select_main(files)
         titles = self.thread_titles.get(codex_home)
         try:
             focus_view = self.follower.sync(focus_path)
         except OSError as exc:
             log(f"无法读取 {focus_path.name}: {exc}")
-            return stamp_page(empty_payload(now, tz_offset_seconds, "会话文件暂时读不了"), 1, 1)
+            return self._with_pet(
+                stamp_page(empty_payload(now, tz_offset_seconds, "会话文件暂时读不了"), 1, 1),
+                codex_home,
+                now,
+                hook,
+            )
         fresh = self.fresh_views(files, focus_path, now)
         pool = self.quota_pool(files, focus_path, focus_view, fresh)
         focus_payload = self.page_payload(
@@ -240,7 +251,21 @@ class Engine:
         )
         # One page: the user's chatting window. Running helpers are not shown.
         # 已完成 / 已中断 stays until that same window starts another turn.
-        return stamp_page(focus_payload, 1, 1)
+        return self._with_pet(stamp_page(focus_payload, 1, 1), codex_home, now, hook)
+
+    def _with_pet(
+        self,
+        payload: dict,
+        codex_home: Path,
+        now: float,
+        hook: HookHint | None,
+    ) -> dict:
+        try:
+            thread_status.attach_pet(payload, Path(codex_home).expanduser(), now, hook)
+        except Exception as exc:
+            log(f"thread_status 读取失败: {exc}")
+            payload.update(thread_status.empty_pet())
+        return payload
 
     def select_main(self, files: list[Path]) -> Path:
         """Newest rollout that is the user's chatting window.
@@ -529,7 +554,12 @@ class Service:
         # Read-only Grok Bot usage and app state, cached for a few seconds.
         self.grok = grok if grok is not None else GrokReader()
         self.engine = Engine()
-        self.lock = threading.Lock()
+        # payload_lock is short: hook, cached payload, subscribers.
+        # compute_lock serializes Engine / SessionFollower (not thread-safe).
+        # snapshot() only takes payload_lock, so /status stays fast during a
+        # long publish().
+        self.payload_lock = threading.Lock()
+        self.compute_lock = threading.Lock()
         self.hook: HookHint | None = None
         self.payload: dict = empty_payload(time.time(), tz_offset)
         self.wake = threading.Event()
@@ -539,27 +569,29 @@ class Service:
 
     def subscribe(self) -> StreamClient:
         client = StreamClient()
-        with self.lock:
+        with self.payload_lock:
             self.subscribers.append(client)
         return client
 
     def unsubscribe(self, client: StreamClient) -> None:
-        with self.lock:
+        with self.payload_lock:
             if client in self.subscribers:
                 self.subscribers.remove(client)
 
     def publish(self) -> dict:
-        # Serialize the whole read-compute-write cycle: the poller thread and a
-        # hook POST (its own HTTP handler thread) both call this, and the
-        # SessionFollower / Engine caches are not thread-safe.
+        # Engine caches are not thread-safe, so poller and hook POST share
+        # compute_lock. The heavy read happens outside payload_lock so
+        # snapshot() / GET /status is not blocked for seconds or minutes.
         now = time.time()
-        with self.lock:
+        with self.payload_lock:
             hook = self.hook
             tz = self.tz_offset
+        with self.compute_lock:
             payload = self.engine.payload(self.codex_home, now, tz, hook)
-            self.payload = payload
-            reason = self.gate.consider(payload, now)
-            subscribers = list(self.subscribers) if reason else []
+            with self.payload_lock:
+                self.payload = payload
+                reason = self.gate.consider(payload, now)
+                subscribers = list(self.subscribers) if reason else []
         if reason:
             blob = sse_bytes(payload)
             for subscriber in subscribers:
@@ -567,14 +599,14 @@ class Service:
         return payload
 
     def snapshot(self) -> dict:
-        with self.lock:
+        with self.payload_lock:
             payload = dict(self.payload)
         payload["grok"] = self.grok.get()
         return payload
 
     def accept_hook(self, body: dict) -> None:
         hint = hint_from_hook(body, time.time())
-        with self.lock:
+        with self.payload_lock:
             self.hook = hint
         try:
             self.publish()
@@ -818,7 +850,10 @@ def serve(
     token: str = "",
 ) -> int:
     service = Service(codex_home, tz_offset, token)
-    service.publish()
+    # Listen immediately with the empty/last payload. The first disk scan
+    # used to run here and could delay bind for minutes on a large ~/.codex,
+    # leaving the board stuck on 等待连接. The poller publishes in the
+    # background as soon as the server is up.
     handler = type("BoundHandler", (Handler,), {"service": service})
     try:
         server = ThreadingHTTPServer((host, port), handler)
